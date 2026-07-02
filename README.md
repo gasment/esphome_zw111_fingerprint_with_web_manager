@@ -47,9 +47,14 @@
 
 
 
+## 使用要求
+- 仅支持esp32及其变体，不支持esp8266
+- 只支持esp-idf框架
 
 
-## 配置参数
+
+## 安装与使用
+### 1. 配置参数
 
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
@@ -64,20 +69,6 @@
 | `identify_button` | button | — | 触发验证按钮 |
 | `sleep_button` | button | — | 触发休眠按钮（可选） |
 
----
-
-## 安装与使用
-### 1. 组件引用
-
-```
-external_components:
-  - source:
-      type: git
-      url: https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager
-      ref: main
-    components: [ zw111 ]
-```
-
 ### 2. 基础配置
 
 ```yaml
@@ -87,7 +78,14 @@ external_components:
       url: https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager
       ref: main
     components: [ zw111 ]
-
+esp32:
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "30"
+      CONFIG_ESP_INT_WDT_TIMEOUT_MS: "800"
+    advanced:
+      loop_task_stack_size: 10240
 uart:
   - id: zw111_uart  
     tx_pin: GPIO4  #任意可分配GPIO
@@ -206,5 +204,6 @@ fp_identify_action:
 - 指纹备注信息（ID 0-15）：存储在模组 Flash
 - 指纹备注信息（ID 16-99）：存储主控NVS分区
 - 配置数据：存储主控NVS分区。
-- 因此，更换主控或清空主控flash不会丢失0-15号指纹的备注信息，优先使用前15个位置。同时注意不要随意更改zw111组件的id配置,会丢失nvs数据
+- 因此，更换主控或清空主控flash不会丢失0-15号指纹的备注信息，优先使用前16个位置。同时注意不要随意更改zw111组件的id配置,会丢失nvs数据
+- 指纹全部位于模组 Flash内，除非手动清空，否则不会丢失
 
