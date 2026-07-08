@@ -38,7 +38,7 @@
 
 | 模组引脚 | 说明 | 连接 ESP32 |
 |---------|------|-----------|
-| VCC | 3.3V 模组供电 | 3.3V |
+| VCC | 3.3V 模组供电 | GPIO13 (控制电路也能提供3.3V 最好能使用MOSFET开关电路)  |
 | GND | 地 | GND |
 | TX | UART 发送 | GPIO5 (RX) |
 | RX | UART 接收 | GPIO4 (TX) |
@@ -70,6 +70,7 @@
 | `sleep_button` | button | — | 触发休眠按钮（可选） |
 
 ### 2. 基础配置
+[完整配置 zw111.yaml](./zw111.yaml "务必阅读备注")
 
 ```yaml
 external_components:

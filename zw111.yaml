@@ -1,0 +1,247 @@
+#这个指纹的模组的web非常吃ESP内存 
+#经常会引起GC 
+#所以很多东西都是寸土寸金 
+#如果出现网页指纹录入失败基本上就是内存满了卡住了
+esphome:
+  name: zw111
+  friendly_name: ZW111指纹识别
+  comment: "ZW111指纹识别模块"
+  name_add_mac_suffix: true
+  on_boot:
+    # 优先级 1000 是最高级别，在绝大部分组件初始化之前执行
+    priority: 1000 
+    then:
+      - switch.turn_on: fingerprint_power_vcc
+      - delay: 500ms # 给指纹模块一点点启动时间
+      - logger.log: {format: "系统启动：已强制开启指纹电源以通过初始化", level: INFO}
+      - if:
+          condition:
+            switch.is_on: fingerprint_auto_power_save
+          then:
+            - logger.log: {format: "省电模式已开启，指纹模块将于 30 秒后进入首次休眠...", level: INFO}
+            - script.execute: smart_shutdown_watchdog
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager
+      ref: main
+    components: [ zw111 ]
+esp32:
+  variant: ESP32
+  framework:
+    type: arduino
+    sdkconfig_options:
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "30"
+      CONFIG_ESP_INT_WDT_TIMEOUT_MS: "800"
+    advanced:
+      loop_task_stack_size: 10240
+
+    
+# 启用日志
+logger:
+  baud_rate: 115200
+  level: ERROR
+  
+wifi:
+  ssid: "你的WIFI SSID"
+  password: "你的WIFI 密码"
+  reboot_timeout: 0s
+  ap:
+    ssid: "ZW111 Fallback Hotspot"
+    password: "IXKl1Zkb6VL"
+
+
+api:
+  reboot_timeout: 0s   # 永不因无客户端而重启
+  encryption:
+    key: "PKwFeIXKl1Zkb6VLCMjK2y4XOlq1no++phVMbzjrwjI=" #这个HA上会要求你填这个密钥 也可以自己去这里生成https://esphome.io/components/api/#configuration-variables
+    
+# 为什么要添加这个web_server 因为不加上这个有些芯片下面的zw111会打不开 可以尝试删除掉 如果没有问题就行
+web_server:
+  port: 80
+  auth:
+    username: "admin"       # 自定义用户名
+    password: "admin"       # 自定义密码
+
+ota:
+  - platform: esphome
+    password: "qq12369874"
+    
+    
+uart:
+  - id: zw111_uart  
+    tx_pin: GPIO4  #任意可分配GPIO
+    rx_pin: GPIO5  #任意可分配GPIO
+    baud_rate: 57600
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+#    debug:
+#      direction: BOTH  # 打印接收和发送的数据
+#      dummy_receiver: true  # 即使没有解析器也显示接收数据
+
+
+zw111:
+  - id: zw111_main
+    uart_id: zw111_uart
+    web_port: 8088 ##任意可分配端口
+    web_username: "admin"
+    web_password: "admin"
+
+    connection_status:
+      name: "ZW111 Connection"
+      id: zw111_main_connection_status
+
+    sensor_check_status:
+      name: "ZW111 Sensor Check"
+      id: zw111_main_sensor_check
+
+    fp_identify_action:
+      name: "Fingerprint ID"
+      id: zw111_main_fp_identify_action
+
+    identify_button:
+      name: "Identify"
+      id: zw111_main_identify_button
+
+    sleep_button: 
+      name: "Sleep"
+      id: zw111_main_sleep_button
+      
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO6  #任意可分配GPIO
+      mode: INPUT_PULLDOWN  #最好用一下下拉
+    name: "Fingerprint Pressed"
+    id: finger_pressed
+    icon: "mdi:fingerprint"
+    filters:
+      - delayed_off: 500ms # 稍微缩短延迟，提高响应速度
+    on_press:
+      then:
+        - script.stop: smart_shutdown_watchdog
+        - if:
+            condition:
+              switch.is_on: fingerprint_auto_power_save
+            then:
+              - switch.turn_on: fingerprint_power_vcc 
+              - delay: 250ms # 等待内核启动（开发手册 2.3 节建议）
+        - button.press: zw111_main_identify_button # 触发识别
+    on_release:
+      then:
+        - if:
+            condition:
+              switch.is_on: fingerprint_auto_power_save
+            then:
+              - script.execute: smart_shutdown_watchdog
+              - logger.log: {format: "指纹检测触发", level: INFO}
+
+# 在配置中定义一个开关，用于控制ZW111的VCC
+switch:
+  - platform: gpio
+    pin: GPIO13  # 替换为你实际连接的GPIO号 貌似VCC直接用信号线供电也足够了 如果有失败的情况 请加上MOSFET开关电路
+    id: fingerprint_power_vcc
+    restore_mode: ALWAYS_ON  # 设备重启后默认为断电状态
+    name: "Fingerprint VCC"
+    on_turn_on:
+      then:
+        - if:
+            condition:
+              switch.is_on: fingerprint_auto_power_save
+            then:
+              - script.execute: 
+                  id: smart_shutdown_watchdog
+        - logger.log: {format: "指纹电源已开启", level: INFO}
+        - if:
+            condition:
+              # 只有在连接传感器显示“断开”时才执行 setup
+              binary_sensor.is_off: zw111_main_connection_status
+            then:
+              #已经测试过了 延迟必须加 不然冷启动会报错 
+              # 大约200ms+ 官方文档也有提及
+              # 也可以配合ha的自动化联合binary_sensor.xxx_zw111_connection加上连接状态判断进行二次启动
+              #如果经常报zw111 is marked FAILED: unspecified 可以适当加大延迟
+              - delay: 200ms 
+              - logger.log: {format: "检测到通信未建立，正在强制同步软件状态...", level: INFO}
+              - lambda: |-
+                   id(zw111_main).setup(); 
+              - logger.log: {format: "ZW111 软件同步指令已发送", level: INFO}
+            else:
+              - logger.log: {format: "ZW111 已经在连接状态，跳过同步步骤", level: INFO}
+    
+  - platform: template
+    name: "自动省电模式"
+    id: fingerprint_auto_power_save
+    icon: "mdi:leaf"
+    optimistic: true  # 允许手动切换并记录状态
+    restore_mode: RESTORE_DEFAULT_ON # 第一次启动时默认开启，之后会记忆上次的选择
+    
+#sensor:   
+#  - platform: wifi_signal
+#    name: "WiFi信号强度"
+#    id: wifi_signal_strength
+#    update_interval: 10s
+#    unit_of_measurement: "dBm"
+#    device_class: signal_strength
+#    entity_category: diagnostic
+      
+ # ===== WiFi 文本信息传感器 ===== 用不上可以全部删了
+text_sensor:
+  - platform: wifi_info
+    ssid:
+      name: "WiFi SSID"
+#    bssid:
+#      name: "WiFi BSSID"
+    mac_address:
+      name: "MAC地址"
+    ip_address:
+      name: "IP地址"
+#    dns_address:
+#      name: "DNS地址"
+      
+button:
+  - platform: restart
+    name: "重启ESP32"
+    icon: "mdi:restart"
+    
+    
+script:
+  - id: official_shutdown_sequence
+    mode: restart # 如果脚本正在运行再次触发，则重新开始
+    then:
+      - if:
+          condition:
+            switch.is_on: fingerprint_auto_power_save
+          then:
+            # 发送休眠指令 (对应手册 33H 指令)
+            - button.press: zw111_main_sleep_button
+            # 等待模块处理休眠
+            - delay: 200ms 
+            # 彻底切断 VCC 物理供电
+            - switch.turn_off: fingerprint_power_vcc
+            - logger.log: 
+                format: "ZW111 已按官方标准流程进入休眠并断电"
+                level: INFO
+                
+  # 延迟断电逻辑
+  # 模式设为 restart，避免占用过多的内存
+  - id: smart_shutdown_watchdog
+    mode: restart 
+    then:
+      - delay: 30s
+      - if:
+          condition:
+            # 如果 30s 后还在按着指纹，就再等 1 分钟
+            binary_sensor.is_on: finger_pressed
+          then:
+            - delay: 1min
+      - if:
+          condition:
+            and:
+              - switch.is_on: fingerprint_auto_power_save
+              - binary_sensor.is_off: finger_pressed
+          then:
+            - script.execute: official_shutdown_sequence
+            
