@@ -95,7 +95,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 
 <div id="tab-fingerprint" class="tab-content active">
 <div class="card"><div class="fp-grid" id="fpGrid"></div><div class="pagination" id="pagination"></div></div>
-<div class="card"><h3>操作</h3><div class="action-row"><button class="btn btn-primary" onclick="showBatchDelete()">批量删除</button></div></div>
+ <div class="card"><h3>操作</h3><div class="action-row"><button class="btn btn-primary" onclick="showBatchDelete()">批量删除</button><button class="btn btn-outline" onclick="doSync()">数据同步</button></div></div>
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -293,6 +293,13 @@ function goPage(p){if(p>=0&&p<FP_PAGES){currentPage=p;renderFingerprint()}}
 function doVerify(){_api('POST','/api/verify',{}).then(function(r){if(r&&r.ok)toast('验证已启动','ok')})}
 function doCancel(){_api('POST','/api/cancel',{}).then(function(r){if(r&&r.ok)toast('已取消','ok')})}
 function doRefresh(){loadAll().then(function(){renderAll();renderFingerprint();toast('已刷新','ok')})}
+function doSync(){
+  toast('正在同步数据...','info');
+  _api('POST','/api/sync',{}).then(function(r){
+    if(r&&r.ok){toast(r.msg||'数据同步完成','ok');loadAll().then(function(){renderFingerprint()});loadEnrolled();}
+    else toast('同步失败','err')
+  }).catch(function(){toast('网络错误','err')})
+}
 function loadAll(){return loadState().then(function(){var ps=[];for(var i=0;i<100;i++)ps.push(loadNotepad(i));return Promise.all(ps)})}
 function loadNotepad(pageIdx){return _api('POST','/api/read_notepad',{page:pageIdx}).then(function(r){if(r&&r.content!==undefined)NOTEPAD[pageIdx]=r.content}).catch(function(){})}
 function renderAll(){
@@ -301,7 +308,6 @@ function renderAll(){
   function infoItem(label,val){return'<div class="info-item"><span class="info-label">'+label+'</span><span class="info-value">'+val+'</span></div>'}
   var sensorSize=fv('Sensor_Size');sensorSize=sensorSize.replace(/ px/g,'').replace('px','');
   m.innerHTML=
-
     infoItem('设备型号',fv('Product_SN'))+
     infoItem('固件版本',fv('Software_Ver'))+
     infoItem('生产厂商',fv('Manufacturer'))+
@@ -324,7 +330,6 @@ function setEnrollRingClass(cls){var ring=$('enrollRing'),finger=$('enrollFinger
 function startEnroll(){
   if(!modalId&&modalId!==0){toast('请先选择指纹ID','err');return}
   if(ENROLLED[modalId]){toast('该ID已注册指纹','info');return}
-  // 清除上次未完成的取消超时, 防止新弹窗被意外关闭
   if(cancelTimeout){clearTimeout(cancelTimeout);cancelTimeout=null}
   if(enrollPollTimer){clearInterval(enrollPollTimer);enrollPollTimer=null}
   closeModal();
@@ -358,7 +363,6 @@ function cancelEnroll(){
   $('enrollCancelBtn').disabled=true;$('enrollCancelBtn').textContent='正在取消...';
   _api('POST','/api/cancel',{}).then(function(r){
     if(r&&r.ok){$('enrollMsg').textContent='已发送取消指令';}
-    // 5s后强制关闭弹窗(防止取消指令卡死时弹窗无法关闭)
     cancelTimeout=setTimeout(function(){
       cancelTimeout=null;
       if($('enrollOverlay').classList.contains('active')){
@@ -368,7 +372,6 @@ function cancelEnroll(){
       }
     },5000);
   }).catch(function(){
-    // API调用失败立即关闭
     if(enrollPollTimer){clearInterval(enrollPollTimer);enrollPollTimer=null}
     $('enrollOverlay').classList.remove('active');
     loadEnrolled().then(function(){renderFingerprint();});
