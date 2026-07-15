@@ -6,6 +6,7 @@ from esphome.const import (
     CONF_ID,
     ENTITY_CATEGORY_DIAGNOSTIC,
 )
+from esphome import pins
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["binary_sensor", "text_sensor", "button"]
@@ -23,6 +24,9 @@ CONF_FP_IDENTIFY_SENSOR = "fp_identify_action"
 CONF_IDENTIFY_BUTTON = "identify_button"
 CONF_SLEEP_BUTTON = "sleep_button"
 CONF_SENSOR_CHECK_STATUS = "sensor_check_status"
+CONF_POWER_CTL_PIN = "power_ctl_pin"
+CONF_TOUCH_SENSE_PIN = "touch_sense_pin"
+CONF_TOUCH_SENSOR = "touch_sensor"
 
 CONFIG_SCHEMA = cv.ensure_list(cv.Schema({
     cv.GenerateID(): cv.declare_id(ZW111Component),
@@ -47,6 +51,11 @@ CONFIG_SCHEMA = cv.ensure_list(cv.Schema({
         device_class="problem",
         entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
     ),
+
+    cv.Optional(CONF_TOUCH_SENSOR): binary_sensor.binary_sensor_schema(),
+
+    cv.Optional(CONF_POWER_CTL_PIN): pins.gpio_output_pin_schema,
+    cv.Optional(CONF_TOUCH_SENSE_PIN): pins.gpio_input_pin_schema,
 }).extend(cv.COMPONENT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA))
 
 
@@ -56,7 +65,6 @@ async def to_code(config):
         await cg.register_component(var, conf)
         await uart.register_uart_device(var, conf)
 
-        # 传入组件 ID 作为 NVS 命名空间前缀 (多实例隔离)
         cg.add(var.set_nvs_prefix(str(conf[CONF_ID])))
 
         cg.add(var.set_web_port(conf[CONF_WEB_PORT]))
@@ -87,3 +95,15 @@ async def to_code(config):
         if CONF_SENSOR_CHECK_STATUS in conf:
             sens = await binary_sensor.new_binary_sensor(conf[CONF_SENSOR_CHECK_STATUS])
             cg.add(var.set_sensor_check_status(sens))
+
+        if CONF_TOUCH_SENSOR in conf:
+            sens = await binary_sensor.new_binary_sensor(conf[CONF_TOUCH_SENSOR])
+            cg.add(var.set_touch_sensor(sens))
+
+        if CONF_POWER_CTL_PIN in conf:
+            pin = await cg.gpio_pin_expression(conf[CONF_POWER_CTL_PIN])
+            cg.add(var.set_power_ctl_pin(pin))
+
+        if CONF_TOUCH_SENSE_PIN in conf:
+            pin = await cg.gpio_pin_expression(conf[CONF_TOUCH_SENSE_PIN])
+            cg.add(var.set_touch_sense_pin(pin))
