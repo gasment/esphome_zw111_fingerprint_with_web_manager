@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/gpio.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -41,9 +42,11 @@ static const uint32_t DEFAULT_TIMEOUT_MS = 1000;
 static const uint32_t LONG_TIMEOUT_MS = 5000;
 static const uint16_t INF_PAGE_SIZE = 512;
 static const char *LED_TYPE_NAMES[] = {"None","RGB 3-Color","Blue","Red","Green","Red+Blue","Red+Green","Blue+Green","White"};
+
 class ZW111Component : public Component, public uart::UARTDevice {
  public:
   ZW111Component() = default;
+  ~ZW111Component();
 
   void setup() override;
   void loop() override;
@@ -57,35 +60,39 @@ class ZW111Component : public Component, public uart::UARTDevice {
   void set_web_password(const std::string &p) { web_pass_ = p; }
   void set_fp_identify_sensor(esphome::text_sensor::TextSensor *s) { fp_identify_sensor_ = s; }
   void set_nvs_prefix(const std::string &prefix) { nvs_prefix_ = prefix; }
+  void set_power_ctl_pin(GPIOPin *pin) { power_ctl_pin_ = pin; }
+  void set_touch_sense_pin(GPIOPin *pin) { touch_sense_pin_ = pin; }
+  void set_touch_sensor(esphome::binary_sensor::BinarySensor *s) { touch_sensor_ = s; }
 
   void trigger_identify();
   void trigger_sleep();
+  void power_on_and_init();
 
-  void handle_get_state(void *req);
-  void handle_get_settings(void *req);
-  void handle_get_enrolled(void *req);
-  void handle_get_enroll_status(void *req);
-  void handle_post_action(void *req, const char *action, const char *body);
+  // Mongoose HTTP handlers (direct)
+  void handle_get_state(struct mg_connection *c);
+  void handle_get_settings(struct mg_connection *c);
+  void handle_get_enrolled(struct mg_connection *c);
+  void handle_get_enroll_status(struct mg_connection *c);
+  void handle_post_action(struct mg_connection *c, const char *action, const char *body);
 
   uint16_t web_port_{0};
   bool web_started_{false};
   std::string web_user_;
   std::string web_pass_;
 
-  // Enroll 状态机 (供 WebGUI 轮询)
   enum EnrollPhase : uint8_t {
     ENROLL_IDLE = 0,
-    ENROLL_SETUP,        // 正在配置参数
-    ENROLL_WAIT_FINGER,  // 请放置手指
-    ENROLL_CAPTURED,     // 图像已采集, 正在生成特征
-    ENROLL_GEN_DONE,     // 特征生成完毕
-    ENROLL_LIFT_FINGER,  // 请抬起手指
-    ENROLL_MERGE,        // 正在合并模板
-    ENROLL_DUP_CHECK,    // 正在检查重复
-    ENROLL_STORE,        // 正在存储模板
-    ENROLL_SUCCESS,      // 录入成功
-    ENROLL_FAILED,       // 录入失败
-    ENROLL_CANCELED      // 已被取消
+    ENROLL_SETUP,
+    ENROLL_WAIT_FINGER,
+    ENROLL_CAPTURED,
+    ENROLL_GEN_DONE,
+    ENROLL_LIFT_FINGER,
+    ENROLL_MERGE,
+    ENROLL_DUP_CHECK,
+    ENROLL_STORE,
+    ENROLL_SUCCESS,
+    ENROLL_FAILED,
+    ENROLL_CANCELED
   };
   volatile bool enroll_busy_{false};
   volatile bool enroll_cancel_{false};
@@ -103,12 +110,18 @@ class ZW111Component : public Component, public uart::UARTDevice {
   bool is_enroll_busy() const { return enroll_busy_; }
   bool is_identify_busy() const { return identify_busy_; }
 
-  // LED 控制 (PS_ControlBLN 多功能三色灯)
   void led_control(uint8_t func, uint8_t color, uint8_t cycles, uint8_t time_10ms);
   void led_all_off();
   void led_green_steady();
   void led_red_blink(uint8_t times);
   void led_blue_blink();
+
+  // Mongoose event manager (public for static handler)
+  struct mg_mgr mgr_;
+  bool mgr_inited_{false};
+
+  void start_mongoose_server();
+  bool check_auth(const std::string &header_value);  // public: used by static mg_ev_handler
 
  protected:
   uint16_t calc_checksum(const uint8_t *data, uint16_t len);
@@ -125,7 +138,6 @@ class ZW111Component : public Component, public uart::UARTDevice {
   std::string nvs_cfg();
   std::string extract_ascii_string(const uint8_t *data, uint16_t len);
   const char *led_type_to_name(uint16_t lt);
-  void start_web_server();
 
   struct DeviceInfo {
     std::string product_sn;
@@ -151,11 +163,26 @@ class ZW111Component : public Component, public uart::UARTDevice {
 
   void flush_dirty_notepad();
   void load_all_notepads();
-  void write_notepad_flash(int page, const std::string &content);
-  std::string read_notepad_flash(int page);
   void write_notepad_nvs(int id, const std::string &content);
   std::string read_notepad_nvs(int id);
 
+  void save_index_table_to_nvs();
+  bool load_index_table_from_nvs();
+  void sync_index_table_from_uart();
+
+  // Sleep状态NVS持久化 (deepsleep唤醒后跳过耗时检查)
+  bool sleep_nvs_get();
+  void sleep_nvs_set(bool sleeping);
+
+  // 设备地址NVS缓存 (唤醒时无需UART读取)
+  void save_device_addr_nvs();
+  bool load_device_addr_nvs();
+
+  // 静态模块信息NVS缓存 (唤醒时无需UART读取ReadAddPara/ReadInfPage)
+  void save_info_nvs();
+  bool load_info_nvs();
+
+  bool nvs_has_index_cache_{false};
   bool initialized_{false};
   std::string nvs_prefix_;
   uint32_t device_addr_{DEFAULT_DEVICE_ADDRESS};
@@ -163,7 +190,6 @@ class ZW111Component : public Component, public uart::UARTDevice {
   uint8_t rx_buffer_[MAX_PACKET_SIZE];
 
   int dirty_index_{0};
-
   bool enrolled_[100]{};
 
   uint8_t setting_enroll_max_{5};
@@ -174,8 +200,9 @@ class ZW111Component : public Component, public uart::UARTDevice {
 
   esphome::binary_sensor::BinarySensor *connection_status_{nullptr};
   esphome::binary_sensor::BinarySensor *sensor_check_status_{nullptr};
-
-  // 指纹验证
+  esphome::binary_sensor::BinarySensor *touch_sensor_{nullptr};
+  GPIOPin *power_ctl_pin_{nullptr};
+  GPIOPin *touch_sense_pin_{nullptr};
   bool identify_busy_{false};
   esphome::text_sensor::TextSensor *fp_identify_sensor_{nullptr};
 };
