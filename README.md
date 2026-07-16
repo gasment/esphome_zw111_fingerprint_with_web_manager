@@ -1,9 +1,21 @@
-# ZW111 指纹模组 ESPHome 外部组件
+# ZW111 指纹模组 ESPHome 外部组件（V1）
 
-[![ESPHome](https://img.shields.io/badge/ESPHome-2024.6+-blue.svg)](https://esphome.io)
+[![ESPHome](https://img.shields.io/badge/ESPHome-2026.6+-blue.svg)](https://esphome.io)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-基于 ESPHome 的 ZW111 海凌科指纹模组外部组件，支持指纹录入、验证、删除、批量管理、Web 管理界面等功能。
+基于 ESPHome 的 ZW111 海凌科指纹模组外部组件，支持指纹录入、验证、删除、批量管理、Web 管理、低功耗睡眠模式等
+
+## V2与V1差异：
+|  | V1 | V2 |
+|---------|------|-----------|
+| Web实现 | esp_http_server | Mongoose 7.22 |
+| 指纹模组睡眠 |基础睡眠 | 完整唤醒逻辑|
+| ESP深度睡眠支持 |否 | 是|
+| VCC使能模式 | ESPHome通用组件(switch/output) | 专有配置|
+| 触摸传感器 | ESPHome通用组件(binary_sensor) | 专有配置 |
+
+* V2对V1存在破坏性更新，无法从V1迁移到V2
+* 跳转到[V2](https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager/tree/v1 "V2")
 
 ---
 
