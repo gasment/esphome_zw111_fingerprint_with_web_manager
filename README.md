@@ -88,7 +88,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager
-      ref: main
+      ref: v1
     components: [ zw111 ]
 esp32:
   framework:
