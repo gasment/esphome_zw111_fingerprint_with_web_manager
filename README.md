@@ -55,6 +55,10 @@
 | TX | 4 |UART 发送 | 任意可用GPIO (RX) |
 | RX | 5 |UART 接收 | 任意可用GPIO(TX)  |
 | GND | 6 | 地 |--|
+<img width="287" height="283" alt="ScreenShot_2026-07-16_110325_420" src="https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager/blob/dev/ScreenShot_2026-07-16_110325_420.png" />
+* 官方PMOS电路示例
+<img width="287" height="283" alt="ScreenShot_2026-07-16_110325_420" src="https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager/blob/dev/ScreenShot_2026-07-16_110028_647.png" />
+
 
 ## 使用要求
 - esp32及其变体
