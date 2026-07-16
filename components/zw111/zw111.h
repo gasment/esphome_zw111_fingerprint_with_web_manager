@@ -66,14 +66,17 @@ class ZW111Component : public Component, public uart::UARTDevice {
 
   void trigger_identify();
   void trigger_sleep();
+  void trigger_web_refresh();
   void power_on_and_init();
 
   // Mongoose HTTP handlers (direct)
   void handle_get_state(struct mg_connection *c);
   void handle_get_settings(struct mg_connection *c);
   void handle_get_enrolled(struct mg_connection *c);
+  void handle_get_all_notepads(struct mg_connection *c);
   void handle_get_enroll_status(struct mg_connection *c);
   void handle_post_action(struct mg_connection *c, const char *action, const char *body);
+  void handle_get_init(struct mg_connection *c);
 
   uint16_t web_port_{0};
   bool web_started_{false};
@@ -170,10 +173,6 @@ class ZW111Component : public Component, public uart::UARTDevice {
   bool load_index_table_from_nvs();
   void sync_index_table_from_uart();
 
-  // Sleep状态NVS持久化 (deepsleep唤醒后跳过耗时检查)
-  bool sleep_nvs_get();
-  void sleep_nvs_set(bool sleeping);
-
   // 设备地址NVS缓存 (唤醒时无需UART读取)
   void save_device_addr_nvs();
   bool load_device_addr_nvs();
@@ -181,6 +180,9 @@ class ZW111Component : public Component, public uart::UARTDevice {
   // 静态模块信息NVS缓存 (唤醒时无需UART读取ReadAddPara/ReadInfPage)
   void save_info_nvs();
   bool load_info_nvs();
+  // sensor_check_result NVS持久化
+  void save_sensor_check_nvs();
+  void load_sensor_check_nvs();
 
   bool nvs_has_index_cache_{false};
   bool initialized_{false};
@@ -204,6 +206,7 @@ class ZW111Component : public Component, public uart::UARTDevice {
   GPIOPin *power_ctl_pin_{nullptr};
   GPIOPin *touch_sense_pin_{nullptr};
   bool identify_busy_{false};
+  bool web_refresh_triggered_{false};
   esphome::text_sensor::TextSensor *fp_identify_sensor_{nullptr};
 };
 
