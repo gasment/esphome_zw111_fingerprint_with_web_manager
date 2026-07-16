@@ -110,29 +110,6 @@ void ZW111Component::flush_input() { while (this->available()) this->read(); }
 std::string ZW111Component::nvs_ns() { return nvs_prefix_.empty() ? "zw111_n" : nvs_prefix_ + "_n"; }
 std::string ZW111Component::nvs_cfg() { return nvs_prefix_.empty() ? "zw111_c" : nvs_prefix_ + "_c"; }
 
-// Sleep状态NVS持久化
-bool ZW111Component::sleep_nvs_get() {
-  nvs_handle_t handle;
-  std::string ns = nvs_cfg();
-  if (nvs_open(ns.c_str(), NVS_READONLY, &handle) == ESP_OK) {
-    uint8_t v = 0;
-    nvs_get_u8(handle, "is_sleeping", &v);
-    nvs_close(handle);
-    return v != 0;
-  }
-  return false;
-}
-
-void ZW111Component::sleep_nvs_set(bool sleeping) {
-  nvs_handle_t handle;
-  std::string ns = nvs_cfg();
-  if (nvs_open(ns.c_str(), NVS_READWRITE, &handle) == ESP_OK) {
-    nvs_set_u8(handle, "is_sleeping", sleeping ? 1 : 0);
-    nvs_commit(handle);
-    nvs_close(handle);
-  }
-}
-
 void ZW111Component::load_settings_from_nvs() {
   nvs_handle_t handle;
   std::string ns = nvs_cfg();
@@ -220,6 +197,34 @@ void ZW111Component::save_info_nvs() {
     nvs_commit(handle);
     nvs_close(handle);
   }
+}
+
+// sensor_check_result NVS持久化 (冷启动时保存, 唤醒时直接读)
+void ZW111Component::save_sensor_check_nvs() {
+  nvs_handle_t handle;
+  std::string ns = nvs_cfg();
+  if (nvs_open(ns.c_str(), NVS_READWRITE, &handle) == ESP_OK) {
+    nvs_set_str(handle, "sensor_chk", info_.sensor_check_result.c_str());
+    nvs_commit(handle);
+    nvs_close(handle);
+  }
+}
+
+void ZW111Component::load_sensor_check_nvs() {
+  nvs_handle_t handle;
+  std::string ns = nvs_cfg();
+  if (nvs_open(ns.c_str(), NVS_READONLY, &handle) == ESP_OK) {
+    size_t len = 0;
+    char buf[32];
+    if (nvs_get_str(handle, "sensor_chk", nullptr, &len) == ESP_OK && len > 0) {
+      nvs_get_str(handle, "sensor_chk", buf, &len);
+      info_.sensor_check_result = buf;
+      nvs_close(handle);
+      return;
+    }
+    nvs_close(handle);
+  }
+  info_.sensor_check_result = "";  // 无缓存时置空
 }
 
 bool ZW111Component::load_info_nvs() {
@@ -480,9 +485,16 @@ ZW111Component::~ZW111Component() {
   }
 }
 
+// RTC内存: deepsleep时保留, 断电丢失
+// 所有实例共享同一标记 - deep sleep是MCU级别操作, 一个实例触发sleep全部受影响
+// 多实例场景下正确性: 任一实例sleep→全体fast init; 断电重启→RTC丢失→全体cold start
+static RTC_DATA_ATTR bool s_was_sleeping = false;
+
 void ZW111Component::power_on_and_init() {
-  // 检查是否从sleep唤醒 (deepsleep后RAM丢失, 但从NVS读取状态)
-  bool was_sleeping = sleep_nvs_get();
+  // 检查是否从sleep唤醒
+  // - deepsleep唤醒: RTC内存保留, s_was_sleeping=true
+  // - 断电重启: RTC内存丢失, s_was_sleeping=false (cold start)
+  bool was_sleeping = s_was_sleeping;
   if (was_sleeping) {
     ESP_LOGI(TAG, "Waking from deepsleep (fast init)");
   }
@@ -520,6 +532,8 @@ void ZW111Component::power_on_and_init() {
       }
     }
     load_info_nvs();
+    // 从NVS恢复传感器校准状态 (冷启动时已持久化到NVS, 唤醒无需UART命令)
+    load_sensor_check_nvs();
     // 跳过: do_read_count, AutoIdentify+Cancel (唤醒后立即verify, 无需额外初始化)
     if (connection_status_) connection_status_->publish_state(true);
     if (fp_identify_sensor_) fp_identify_sensor_->publish_state("-");
@@ -556,12 +570,13 @@ void ZW111Component::power_on_and_init() {
     // 冷启动完成后, 缓存设备和模块信息到NVS供下次唤醒使用
     save_device_addr_nvs();
     save_info_nvs();
+    save_sensor_check_nvs();
   }
 
   initialized_ = true;
-  // 初始化完成后清除sleep标记 (无论是否唤醒, 确保下次全量初始化)
+  // 清除RTC sleep标记, 确保下次冷启动或模块重启时走完整初始化流程
   if (was_sleeping) {
-    sleep_nvs_set(false);
+    s_was_sleeping = false;
   }
   ESP_LOGI(TAG, "ZW111 init complete (was_sleeping=%d)", was_sleeping);
 
@@ -582,9 +597,10 @@ void ZW111Component::setup() {
     touch_sense_pin_->setup();
   }
 
-  // Deepsleep唤醒: 委托给快速唤醒路径 (跳过耗时初始化)
-  bool was_sleeping = sleep_nvs_get();
-  if (was_sleeping) {
+  // Deepsleep唤醒: 检查RTC内存标记
+  // RTC_DATA_ATTR在deepsleep时保留, 断电时丢失
+  // 因此: deepsleep唤醒→true, 断电重启→false(cold start)
+  if (s_was_sleeping) {
     if (power_ctl_pin_ != nullptr) {
       power_ctl_pin_->setup();
     }
@@ -635,13 +651,36 @@ void ZW111Component::setup() {
     uint8_t dummy; read_response(&dummy, nullptr, 0, 500);
     flush_input(); delay(30);
   }
+  // 冷启动完成后, 缓存设备和模块信息到NVS供下次唤醒或Web访问使用
+  save_device_addr_nvs();
+  save_info_nvs();
+  save_sensor_check_nvs();
   initialized_ = true;
   ESP_LOGI(TAG, "ZW111 ready");
 }
 
 static uint32_t last_touch_read_ms = 0;
 
+void ZW111Component::trigger_web_refresh() {
+  // 标记需要后台刷新数据 (was_sleep唤醒后, web首次访问时触发)
+  if (initialized_ && !web_refresh_triggered_) {
+    web_refresh_triggered_ = true;
+    ESP_LOGI(TAG, "Web refresh triggered, will refresh UART data in loop()");
+  }
+}
+
 void ZW111Component::loop() {
+  // Web触发后台UART刷新: was_sleep唤醒后首次web访问时更新
+  if (initialized_ && web_refresh_triggered_) {
+    web_refresh_triggered_ = false;
+    ESP_LOGI(TAG, "Executing background UART refresh for web...");
+    // 只从NVS加载IndexTable, 避免发送UART命令触发模块误动作
+    if (!nvs_has_index_cache_) {
+      load_index_table_from_nvs();
+    }
+    load_settings_from_nvs();
+  }
+
   // Touch sense 轮询：sleep模式10ms快速响应, 正常模式50ms节省CPU
   if (touch_sense_pin_ != nullptr && touch_sensor_ != nullptr) {
     uint32_t interval = initialized_ ? 50 : 10;
@@ -714,6 +753,8 @@ static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 
     // Serve index page (no auth required so login UI can load)
     if (mg_strcmp(uri, mg_str("/")) == 0 || mg_strcmp(uri, mg_str("/index.html")) == 0) {
+      // 用户打开web页面时, 触发后台UART数据刷新 (was_sleep后用真实数据更新)
+      self->trigger_web_refresh();
       mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n" CORS_HDRS
                 "Content-Length: %d\r\n\r\n", (int) strlen(ZW111_HTML));
       mg_send(c, ZW111_HTML, strlen(ZW111_HTML));
@@ -738,6 +779,10 @@ static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
       }
     } else if (mg_strcmp(uri, mg_str("/api/enrolled")) == 0) {
       self->handle_get_enrolled(c);
+    } else if (mg_strcmp(uri, mg_str("/api/notepads")) == 0) {
+      self->handle_get_all_notepads(c);
+    } else if (mg_strcmp(uri, mg_str("/api/init")) == 0) {
+      self->handle_get_init(c);
     } else if (mg_strcmp(uri, mg_str("/api/enroll_status")) == 0) {
       self->handle_get_enroll_status(c);
     } else if (mg_strcmp(uri, mg_str("/api/enroll")) == 0) {
@@ -779,12 +824,14 @@ void ZW111Component::start_mongoose_server() {
 
 void ZW111Component::handle_get_state(struct mg_connection *c) {
   char buf[1200];
+  // 如果sensor_check_result为空, 返回"未检测"而非空字符串
+  const char *scr = info_.sensor_check_result.empty() ? "未检测" : info_.sensor_check_result.c_str();
   snprintf(buf, sizeof(buf),
     "{\"Product_SN\":\"%s\",\"Software_Ver\":\"%s\",\"Manufacturer\":\"%s\",\"Sensor_Name\":\"%s\",\"Device_Address\":\"%s\",\"LED_Type\":\"%s\",\"Sensor_Size\":\"%s\",\"Enroll_Count\":%.0f,\"Template_Size\":%.0f,\"Database_Size\":%.0f,\"Score_Level\":%.0f,\"Baud_Rate\":%.0f,\"Templates_Per_Finger\":%.0f,\"Stored_Count\":%.0f,\"Last_Result\":\"%s\",\"Sensor_Check_Result\":\"%s\"}",
     info_.product_sn.c_str(), info_.software_ver.c_str(), info_.manufacturer.c_str(), info_.sensor_name.c_str(),
     info_.device_addr.c_str(), info_.led_type.c_str(), info_.sensor_size.c_str(),
     info_.enroll_count, info_.template_size, info_.database_size, info_.score_level, info_.baud_rate, info_.templates_per_finger, info_.stored_count, info_.last_result.c_str(),
-    info_.sensor_check_result.c_str());
+    scr);
   mg_http_reply(c, 200, "", "%s\n", buf);
 }
 
@@ -808,6 +855,95 @@ void ZW111Component::handle_get_enrolled(struct mg_connection *c) {
   }
   json += "]}";
   mg_http_reply(c, 200, "", "%s\n", json.c_str());
+}
+
+void ZW111Component::handle_get_all_notepads(struct mg_connection *c) {
+  // 批量返回所有notepad, 避免Web前端逐个请求100次
+  std::string json = "{\"notepads\":[";
+  for (int i = 0; i < 100; i++) {
+    // 懒加载: 唤醒后首次Web访问时按需从NVS读取
+    if (notepad_cache_[i].empty()) {
+      notepad_cache_[i] = read_notepad_nvs(i);
+    }
+    if (i > 0) json += ",";
+    json += "\"";
+    // 转义特殊字符
+    for (size_t j = 0; j < notepad_cache_[i].length(); j++) {
+      char c = notepad_cache_[i][j];
+      if (c == '"' || c == '\\') json += "\\";
+      json += c;
+    }
+    json += "\"";
+  }
+  json += "]}";
+  mg_http_reply(c, 200, "", "%s\n", json.c_str());
+}
+
+void ZW111Component::handle_get_init(struct mg_connection *c) {
+  // 初始化API: 一次性返回所有数据, 前端显示loading等待
+  // 不发送任何UART命令 (was_sleep路径下模块可能处于响应状态, 发命令会误触发)
+
+  // 加载IndexTable (懒加载: 从NVS读)
+  if (!nvs_has_index_cache_) {
+    load_index_table_from_nvs();
+  }
+
+  // 从NVS加载模块静态信息 (冷启动时do_read_para()已保存到NVS)
+  load_info_nvs();
+  load_sensor_check_nvs();
+
+  // 构建enrolled数组
+  std::string enrolled_json = "[";
+  for (int i = 0; i < 100; i++) {
+    if (i > 0) enrolled_json += ",";
+    enrolled_json += enrolled_[i] ? "true" : "false";
+  }
+  enrolled_json += "]";
+
+  // 构建notepads数组 (懒加载)
+  std::string notepads_json = "[";
+  for (int i = 0; i < 100; i++) {
+    if (notepad_cache_[i].empty()) {
+      notepad_cache_[i] = read_notepad_nvs(i);
+    }
+    if (i > 0) notepads_json += ",";
+    notepads_json += "\"";
+    for (size_t j = 0; j < notepad_cache_[i].length(); j++) {
+      char cc = notepad_cache_[i][j];
+      if (cc == '"' || cc == '\\') notepads_json += "\\";
+      notepads_json += cc;
+    }
+    notepads_json += "\"";
+  }
+  notepads_json += "]";
+
+  // 构建state
+  const char *scr = info_.sensor_check_result.empty() ? "未检测" : info_.sensor_check_result.c_str();
+  char state_buf[1200];
+  snprintf(state_buf, sizeof(state_buf),
+    "{\"Product_SN\":\"%s\",\"Software_Ver\":\"%s\",\"Manufacturer\":\"%s\",\"Sensor_Name\":\"%s\",\"Device_Address\":\"%s\",\"LED_Type\":\"%s\",\"Sensor_Size\":\"%s\",\"Enroll_Count\":%.0f,\"Template_Size\":%.0f,\"Database_Size\":%.0f,\"Score_Level\":%.0f,\"Baud_Rate\":%.0f,\"Templates_Per_Finger\":%.0f,\"Stored_Count\":%.0f,\"Last_Result\":\"%s\",\"Sensor_Check_Result\":\"%s\"}",
+    info_.product_sn.c_str(), info_.software_ver.c_str(), info_.manufacturer.c_str(), info_.sensor_name.c_str(),
+    info_.device_addr.c_str(), info_.led_type.c_str(), info_.sensor_size.c_str(),
+    info_.enroll_count, info_.template_size, info_.database_size, info_.score_level, info_.baud_rate, info_.templates_per_finger, info_.stored_count, info_.last_result.c_str(),
+    scr);
+
+  // settings
+  char settings_buf[256];
+  snprintf(settings_buf, sizeof(settings_buf),
+    "{\"score_level\":%d,\"enroll_max\":%d,\"dup_block\":%d}",
+    (int)info_.score_level, setting_enroll_max_, setting_dup_block_);
+
+  // 拼接完整响应 (notepads可能有100条数据, 需要足够大的buffer)
+  std::string resp = "{\"state\":";
+  resp += state_buf;
+  resp += ",\"enrolled\":";
+  resp += enrolled_json;
+  resp += ",\"notepads\":";
+  resp += notepads_json;
+  resp += ",\"settings\":";
+  resp += settings_buf;
+  resp += "}";
+  mg_http_reply(c, 200, "", "%s\n", resp.c_str());
 }
 
 void ZW111Component::handle_get_enroll_status(struct mg_connection *c) {
@@ -1204,8 +1340,8 @@ void ZW111Component::trigger_sleep() {
     ESP_LOGW(TAG, "Sleep command: no response");
   }
   initialized_ = false;
-  // 设置sleep状态到NVS (deepsleep唤醒后跳过耗时检查)
-  sleep_nvs_set(true);
+  // 设置RTC内存sleep标记: deepsleep唤醒时保留, 断电丢失
+  s_was_sleeping = true;
   if (power_ctl_pin_ != nullptr) {
     delay(50);
     power_ctl_pin_->digital_write(false);
