@@ -24,6 +24,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .info-value{font-weight:600;font-size:var(--fs-xs);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn{padding:var(--ps) var(--p);border:none;border-radius:var(--rad);font-size:var(--fs-sm);cursor:pointer;font-weight:600;transition:.2s}
 .btn-primary{background:var(--highlight);color:#fff}.btn-primary:hover{opacity:.85}
+.btn-danger{background:#c0392b;color:#fff}.btn-danger:hover{opacity:.85}
 .btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}.btn-outline:hover{border-color:var(--highlight)}
 .action-row{display:flex;gap:var(--ps);flex-wrap:wrap;align-items:center}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:var(--ps) var(--p);border-radius:var(--rad);font-weight:600;z-index:9999;animation:fadeOut 3s forwards;font-size:var(--fs-xs);white-space:nowrap;max-width:90vw}
@@ -89,13 +90,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .setting-row input[type=checkbox]{width:18px;height:18px;accent-color:var(--highlight);cursor:pointer}
 .setting-row .s-right{display:flex;align-items:center;gap:var(--pxs);margin-left:auto}
 </style></head><body>
-<div class="app">
+<div class="app" id="appMain">
 <div class="header"><div class="dot" id="statusDot"></div><h1>ZW111 指纹识别系统</h1></div>
 <div class="tabs"><button class="active" onclick="switchTab('fingerprint')">指纹管理</button><button onclick="switchTab('settings')">设置/关于</button></div>
 
 <div id="tab-fingerprint" class="tab-content active">
 <div class="card"><div class="fp-grid" id="fpGrid"></div><div class="pagination" id="pagination"></div></div>
-<div class="card"><h3>操作</h3><div class="action-row"><button class="btn btn-primary" onclick="showBatchDelete()">批量删除</button></div></div>
+ <div class="card"><h3>操作</h3><div class="action-row"><button class="btn btn-danger" onclick="showBatchDelete()">批量删除</button><button class="btn btn-primary" onclick="doSync()">数据同步</button></div></div>
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -107,6 +108,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 </div></div>
 </div>
 <div id="toast"></div>
+
+<div class="modal-overlay" id="initOverlay" style="background:var(--bg);display:none;z-index:99999">
+<div class="modal" style="max-width:300px">
+<div class="enroll-icon" style="margin:0 auto var(--p)"><svg viewBox="0 0 80 80"><circle class="enroll-icon-ring waiting" cx="40" cy="40" r="30"/></svg></div>
+<h3 style="font-size:var(--fs);margin-bottom:var(--pxs)">正在加载数据...</h3>
+<p style="color:var(--muted);font-size:var(--fs-xs)" id="initStatus">请稍候</p>
+</div></div>
 
 <div class="modal-overlay" id="loginOverlay" style="background:var(--bg)">
 <div class="modal" style="max-width:320px">
@@ -183,18 +191,14 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 
 <script>
 var STATE={}, NOTEPAD={}, SETTINGS={}, ENROLLED=[], currentPage=0, modalId=0;
-var FP_TOTAL=100, FP_PER_PAGE=16, FP_PAGES=7;
+var FP_TOTAL=100, FP_PER_PAGE=16, FP_PAGES=7, initDone=false;
 var enrollPollTimer=null, enrollPrevPhase=-1, cancelTimeout=null;
 
 function $(id){return document.getElementById(id)}
 function esc(s){return s.replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>').replace(/"/g,'"')}
 
 var _pendingAuthCreds=sessionStorage.getItem('zw111_auth');
-function showLogin(){
-  $('loginOverlay').classList.add('active');
-  document.getElementById('loginUser').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
-  document.getElementById('loginPass').addEventListener('keydown',function(e){if(e.key==='Enter')doLogin()});
-}
+function showLogin(){$('loginOverlay').classList.add('active');$('initOverlay').style.display='none';$('appMain').style.display='block'}
 function doLogin(){
   var u=document.getElementById('loginUser').value;
   var p=document.getElementById('loginPass').value;
@@ -222,13 +226,14 @@ function toast(m,t){var e=$('toast');e.textContent=m;e.className='toast-'+t;e.st
 function loadState(){return _api('GET','/api/state').then(function(r){if(r)STATE=r})}
 function loadSettings(){return _api('GET','/api/settings').then(function(r){if(r){SETTINGS=r;renderSettings()}})}
 function loadEnrolled(){return _api('GET','/api/enrolled').then(function(r){if(r&&r.enrolled){ENROLLED=r.enrolled;renderFingerprint()}}).catch(function(){})}
+function loadNotepadsSync(){return _api('GET','/api/notepads').then(function(r){if(r&&r.notepads){for(var i=0;i<100;i++)NOTEPAD[i]=r.notepads[i]}}).catch(function(){})}
+function loadAll(){return loadState().then(loadNotepadsSync)}
 
 function renderSettings(){
   $('setScoreLevel').value=SETTINGS.score_level||0;
   $('setEnrollMax').value=SETTINGS.enroll_max||5;
   $('setDupBlock').checked=(SETTINGS.dup_block==1);
 }
-
 function onSettingChange(key,val){
   var body={};body[key]=parseInt(val)||0;
   _api('POST','/api/settings',body).then(function(r){
@@ -236,7 +241,6 @@ function onSettingChange(key,val){
     else toast('保存失败','err')
   }).catch(function(){toast('网络错误','err')})
 }
-
 function renderFingerprint(){
   var g=$('fpGrid'),start=currentPage*FP_PER_PAGE,end=Math.min(start+FP_PER_PAGE-1,FP_TOTAL-1),html='';
   for(var id=start;id<=end;id++){
@@ -249,7 +253,6 @@ function renderFingerprint(){
   for(var i=0;i<FP_PAGES;i++)ph+='<button class="'+(i===currentPage?'active':'')+'" onclick="goPage('+i+')">'+(i+1)+'</button>';
   p.innerHTML=ph
 }
-
 function openModal(id){
   modalId=id;$('modalTitle').textContent='ID: '+id;
   $('noteEditor').classList.remove('active');$('noteInput').value=NOTEPAD[id]||'';$('noteStatus').textContent='';
@@ -269,11 +272,8 @@ function closeDeleteOverlay(e){if(!e||e.target===$('deleteOverlay'))$('deleteOve
 function cancelDeleteConfirm(){$('deleteOverlay').classList.remove('active');closeModal()}
 function confirmDelete(){
   var id=modalId;
-  NOTEPAD[id]='';
-  ENROLLED[id]=false;
-  renderFingerprint();
-  $('deleteOverlay').classList.remove('active');
-  closeModal();
+  NOTEPAD[id]='';ENROLLED[id]=false;renderFingerprint();
+  $('deleteOverlay').classList.remove('active');closeModal();
   _api('POST','/api/delete',{page:id,count:1}).then(function(r){
     if(r&&r.ok){loadEnrolled();toast('ID:'+id+' 已删除','ok')}else{toast('删除失败','err')}
   }).catch(function(){toast('网络错误','err')})
@@ -288,43 +288,33 @@ function saveNote(){
   }).catch(function(){$('noteStatus').textContent='网络错误'})
 }
 function cancelNote(){$('noteEditor').classList.remove('active')}
-
 function goPage(p){if(p>=0&&p<FP_PAGES){currentPage=p;renderFingerprint()}}
 function doVerify(){_api('POST','/api/verify',{}).then(function(r){if(r&&r.ok)toast('验证已启动','ok')})}
 function doCancel(){_api('POST','/api/cancel',{}).then(function(r){if(r&&r.ok)toast('已取消','ok')})}
 function doRefresh(){loadAll().then(function(){renderAll();renderFingerprint();toast('已刷新','ok')})}
-function loadAll(){return loadState().then(function(){var ps=[];for(var i=0;i<100;i++)ps.push(loadNotepad(i));return Promise.all(ps)})}
-function loadNotepad(pageIdx){return _api('POST','/api/read_notepad',{page:pageIdx}).then(function(r){if(r&&r.content!==undefined)NOTEPAD[pageIdx]=r.content}).catch(function(){})}
+function doSync(){
+  toast('正在同步数据...','info');
+  _api('POST','/api/sync',{}).then(function(r){
+    if(r&&r.ok){toast(r.msg||'数据同步完成','ok');loadAll().then(function(){renderFingerprint()});loadEnrolled();}
+    else toast('同步失败','err')
+  }).catch(function(){toast('网络错误','err')})
+}
 function renderAll(){
   var m=$('moduleInfo');
   function fv(k){var v=STATE[k];return(v!==undefined&&v!==null)?v:'N/A'}
   function infoItem(label,val){return'<div class="info-item"><span class="info-label">'+label+'</span><span class="info-value">'+val+'</span></div>'}
   var sensorSize=fv('Sensor_Size');sensorSize=sensorSize.replace(/ px/g,'').replace('px','');
-  m.innerHTML=
-
-    infoItem('设备型号',fv('Product_SN'))+
-    infoItem('固件版本',fv('Software_Ver'))+
-    infoItem('生产厂商',fv('Manufacturer'))+
-    infoItem('传感器型号',fv('Sensor_Name'))+
-    infoItem('传感器尺寸',sensorSize)+
-    infoItem('传感器校准',fv('Sensor_Check_Result'))+
-    infoItem('指纹库数量',fv('Database_Size'))+
-    infoItem('已注册指纹数',fv('Stored_Count'))+
-    infoItem('通讯波特率',fv('Baud_Rate'))+
-    infoItem('通讯地址',fv('Device_Address'));
+  m.innerHTML=infoItem('设备型号',fv('Product_SN'))+infoItem('固件版本',fv('Software_Ver'))+infoItem('生产厂商',fv('Manufacturer'))+infoItem('传感器型号',fv('Sensor_Name'))+infoItem('传感器尺寸',sensorSize)+infoItem('传感器校准',fv('Sensor_Check_Result'))+infoItem('指纹库数量',fv('Database_Size'))+infoItem('已注册指纹数',fv('Stored_Count'))+infoItem('通讯波特率',fv('Baud_Rate'))+infoItem('通讯地址',fv('Device_Address'));
 }
 function switchTab(t){
   document.querySelectorAll('.tabs button').forEach(function(b,i){b.classList.toggle('active',(t==='fingerprint'&&i===0)||(t==='settings'&&i===1))});
   $('tab-fingerprint').classList.toggle('active',t==='fingerprint');$('tab-settings').classList.toggle('active',t==='settings');
   if(t==='settings'){loadState().then(function(){renderAll();loadSettings()})}else{renderFingerprint()}
 }
-
 function setEnrollRingClass(cls){var ring=$('enrollRing'),finger=$('enrollFinger');ring.className='enroll-icon-ring '+(cls||'');finger.className='enroll-icon-finger '+(cls||'');}
-
 function startEnroll(){
   if(!modalId&&modalId!==0){toast('请先选择指纹ID','err');return}
   if(ENROLLED[modalId]){toast('该ID已注册指纹','info');return}
-  // 清除上次未完成的取消超时, 防止新弹窗被意外关闭
   if(cancelTimeout){clearTimeout(cancelTimeout);cancelTimeout=null}
   if(enrollPollTimer){clearInterval(enrollPollTimer);enrollPollTimer=null}
   closeModal();
@@ -337,7 +327,6 @@ function startEnroll(){
     enrollPrevPhase=-1;enrollPollTimer=setInterval(pollEnrollStatus,400);
   }).catch(function(){$('enrollMsg').textContent='网络错误';setEnrollRingClass('error')})
 }
-
 function pollEnrollStatus(){
   _api('GET','/api/enroll_status').then(function(s){
     if(!s)return;
@@ -353,28 +342,13 @@ function pollEnrollStatus(){
     if(!s.busy&&phase!==9&&phase!==11){clearInterval(enrollPollTimer);if(phase===10){$('enrollCancelBtn').textContent='关闭';$('enrollCancelBtn').onclick=function(){clearInterval(enrollPollTimer);$('enrollOverlay').classList.remove('active')};}}
   }).catch(function(){})
 }
-
 function cancelEnroll(){
   $('enrollCancelBtn').disabled=true;$('enrollCancelBtn').textContent='正在取消...';
   _api('POST','/api/cancel',{}).then(function(r){
     if(r&&r.ok){$('enrollMsg').textContent='已发送取消指令';}
-    // 5s后强制关闭弹窗(防止取消指令卡死时弹窗无法关闭)
-    cancelTimeout=setTimeout(function(){
-      cancelTimeout=null;
-      if($('enrollOverlay').classList.contains('active')){
-        clearInterval(enrollPollTimer);enrollPollTimer=null;
-        $('enrollOverlay').classList.remove('active');
-        loadEnrolled().then(function(){renderFingerprint();});
-      }
-    },5000);
-  }).catch(function(){
-    // API调用失败立即关闭
-    if(enrollPollTimer){clearInterval(enrollPollTimer);enrollPollTimer=null}
-    $('enrollOverlay').classList.remove('active');
-    loadEnrolled().then(function(){renderFingerprint();});
-  })
+    cancelTimeout=setTimeout(function(){cancelTimeout=null;if($('enrollOverlay').classList.contains('active')){clearInterval(enrollPollTimer);enrollPollTimer=null;$('enrollOverlay').classList.remove('active');loadEnrolled().then(function(){renderFingerprint();});}},5000);
+  }).catch(function(){if(enrollPollTimer){clearInterval(enrollPollTimer);enrollPollTimer=null}$('enrollOverlay').classList.remove('active');loadEnrolled().then(function(){renderFingerprint();})})
 }
-
 function showBatchDelete(){$('batchMenu').style.display='block';$('batchRange').style.display='none';$('batchClear').style.display='none';$('batchOverlay').classList.add('active')}
 function showBatchRange(){$('batchMenu').style.display='none';$('batchRange').style.display='block';$('batchClear').style.display='none'}
 function showBatchClear(){$('batchMenu').style.display='none';$('batchRange').style.display='none';$('batchClear').style.display='block'}
@@ -383,7 +357,6 @@ function closeBatchAll(){$('batchOverlay').classList.remove('active')}
 function closeBatchOverlay(e){if(!e||e.target===$('batchOverlay'))closeBatchAll()}
 function showBatchWait(){$('batchWaitOverlay').classList.add('active')}
 function hideBatchWait(){$('batchWaitOverlay').classList.remove('active')}
-
 function confirmBatchDelete(){
   var s=parseInt($('batchStartId').value)||0,e=parseInt($('batchEndId').value)||0;
   if(s>e){var t=s;s=e;e=t}if(s<0)s=0;if(e>99)e=99;
@@ -394,9 +367,7 @@ function confirmBatchDelete(){
   _api('POST','/api/batch_delete',{start_id:s,end_id:e}).then(function(r){result=r;done=true}).catch(function(){done=true});
   setTimeout(function(){if(!done)setTimeout(function(){finishBatchDel(result,s,e)},2000);else finishBatchDel(result,s,e)},3000);
 }
-
 function finishBatchDel(result,s,e){hideBatchWait();if(result&&result.ok)toast(result.msg||'批量删除完成','ok');else toast(result&&result.msg?result.msg:'批量删除失败','err');loadEnrolled().then(function(){renderFingerprint()});loadState().then(function(){renderAll()})}
-
 function confirmBatchClear(){
   for(var i=0;i<100;i++){ENROLLED[i]=false;NOTEPAD[i]='';}
   renderFingerprint();closeBatchAll();showBatchWait();
@@ -405,12 +376,47 @@ function confirmBatchClear(){
   _api('POST','/api/clear',{}).then(function(r){result=r;done=true}).catch(function(){done=true});
   setTimeout(function(){if(!done)setTimeout(function(){finishBatchClear(result)},2000);else finishBatchClear(result)},3000);
 }
-
 function finishBatchClear(result){hideBatchWait();if(result&&result.ok)toast('指纹库已清空','ok');else toast('清空失败','err');loadEnrolled().then(function(){renderFingerprint()});loadState().then(function(){renderAll()})}
 
-renderFingerprint();
-if(!_pendingAuthCreds)showLogin();
-else{loadAll().then(function(){renderAll()});loadEnrolled().then(function(){renderFingerprint()});loadSettings()}
-setInterval(function(){loadState().then(renderAll);loadEnrolled().then(function(){renderFingerprint()})},15000);
+// 启动流程: loading最多等3秒, 超时或完成后立即关闭
+function showApp(){
+  $('initOverlay').style.display='none';
+  $('appMain').style.display='block';
+}
+function doInit(data){
+  showApp();
+  if(data){
+    if(data.state)STATE=data.state;
+    if(data.enrolled)ENROLLED=data.enrolled;
+    if(data.notepads){for(var i=0;i<100;i++)NOTEPAD[i]=data.notepads[i]}
+    if(data.settings)SETTINGS=data.settings;
+  }
+  renderAll();renderFingerprint();if(SETTINGS.score_level!==undefined)renderSettings();
+  setInterval(function(){loadState().then(renderAll);loadEnrolled().then(function(){renderFingerprint()})},15000);
+}
+function doFallback(){
+  showApp();
+  loadAll().then(function(){renderAll();renderFingerprint()});
+  loadEnrolled().then(function(){renderFingerprint()});
+  loadSettings();
+  setInterval(function(){loadState().then(renderAll);loadEnrolled().then(function(){renderFingerprint()})},15000);
+}
+
+$('initOverlay').style.display='flex';
+var loadStart=Date.now();
+if(!_pendingAuthCreds){showLogin();doFallback()}
+else {
+  // 设置3秒超时
+  var fallbackTimer=setTimeout(function(){if(!initDone){initDone=true;doFallback()}},3000);
+  _api('GET','/api/init').then(function(d){
+    if(!initDone){
+      var elapsed=Date.now()-loadStart;
+      if(elapsed<1000){setTimeout(function(){if(!initDone){initDone=true;clearTimeout(fallbackTimer);doInit(d)}},1000-elapsed)}
+      else{initDone=true;clearTimeout(fallbackTimer);doInit(d)}
+    }
+  }).catch(function(){
+    if(!initDone){initDone=true;clearTimeout(fallbackTimer);doFallback()}
+  })
+}
 </script></body></html>
 )rawliteral";

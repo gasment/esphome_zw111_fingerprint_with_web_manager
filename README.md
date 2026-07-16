@@ -1,11 +1,22 @@
-# ZW111 指纹模组 ESPHome 外部组件
+# ZW111 指纹模组 ESPHome 外部组件（V2）
 
-[![ESPHome](https://img.shields.io/badge/ESPHome-2024.6+-blue.svg)](https://esphome.io)
+[![ESPHome](https://img.shields.io/badge/ESPHome-2026.6+-blue.svg)](https://esphome.io)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-基于 ESPHome 的 ZW111 海凌科指纹模组外部组件，支持指纹录入、验证、删除、批量管理、Web 管理界面等功能。
+基于 ESPHome 的 ZW111 海凌科指纹模组外部组件，支持指纹录入、验证、删除、批量管理、Web 管理、低功耗睡眠模式等
 
----
+## V2与V1差异：
+|  | V1 | V2 |
+|---------|------|-----------|
+| Web实现 | esp_http_server | Mongoose 7.22 |
+| 指纹模组睡眠 |基础睡眠 | 完整唤醒逻辑|
+| ESP深度睡眠支持 |否 | 是|
+| VCC使能模式 | ESPHome通用组件(switch/output) | 专有配置|
+| 触摸传感器 | ESPHome通用组件(binary_sensor) | 专有配置 |
+
+* V2对V1存在破坏性更新，无法从V1迁移到V2
+* 跳转到[V1](https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager/tree/v1 "V1")
+
 
 ## 功能特性
 
@@ -13,149 +24,114 @@
 - **指纹录入** — 支持多次按压采集，自动合并特征并存储模版，录入过程中伴有实时 GUI 反馈
 - **指纹验证** — 1:N 搜索，匹配时输出备注名或 ID，不匹配时提示"No Match"
 - **指纹删除** — 单条删除、连续 ID 区间删除、清空全部指纹库
-- **备注管理** — 为每个指纹 ID 绑定最多 32 字符的字母/数字备注,持久化存储
+- **备注管理** — 为每个指纹 ID 绑定最多 32 字符的字母/数字备注,NVS持久化存储
 - **自定义配置** — 验证置信度(1-5级)、录入采集次数(1-8次)、禁止重复注册开关
-- **多实例支持** — 支持配置多个zw111组件，用于单个主控连接多个指纹模块
 
 
-
-### 自动化集成
+### 组件提供
 - `connection_status` — `binary_sensor`，指纹模组连接状态
 - `sensor_check_status` — `binary_sensor`，传感器校验结果
-- `fp_identify_action` — `text_sensor`，验证结果文本（ID/备注、"No Match"等），支持 `on_value` 自动化触发器
-- `identify_button` — `button`，触发验证流程
-- `sleep_button` — `button`，触发休眠（可选）
+- `fp_identify_action` — `text_sensor`，验证结果文本（ID/备注、"No Match"等）
+- `identify_button` — `button`，手动触发验证流程
+- `sleep_button` — `button`，触发休眠
+- `touch_sensor` - `binary_sensor`，触摸传感器状态
 
 ### Web 管理界面
 - 内建 HTTP 服务器，无需第三方工具组件
+- 支持STA与AP模式下访问
 - Web GU支持指纹管理、备注编辑、系统设置
-- Basic-Auth 认证保护,防止无授权访问
+- 用户名与密码认证保护,防止无授权访问
 - 移动端友好的自适应布局
 
 
 
 ## 硬件接线
 
-| 模组引脚 | 说明 | 连接 ESP32 |
-|---------|------|-----------|
-| VCC | 3.3V 模组供电 | 3.3V |
-| GND | 地 | GND |
-| TX | UART 发送 | GPIO5 (RX) |
-| RX | UART 接收 | GPIO4 (TX) |
-| TOUCH_OUT | 触摸唤醒 IRQ | 任意可用GPIO |
-| V_SENSOR | 触摸反馈 3.3V | 3.3V (常供电) |
-
+| 模组引脚 | 脚位 | 说明 | 连接 ESP32 |
+|---------|--------|-----------|-----------|
+| V_SENSOR | 1 | 触摸供电（3V3常供电） | --|
+| TOUCH_OUT | 2 | 触摸反馈/休眠唤醒 | 任意可用GPIO|
+| VCC | 3 | 模组供电（休眠） | 不需休眠则直连3V3,如需休眠需搭配PMOS电路,控制端连接任意可用GPIO|
+| TX | 4 |UART 发送 | 任意可用GPIO (RX) |
+| RX | 5 |UART 接收 | 任意可用GPIO(TX)  |
+| GND | 6 | 地 |--|
+<img width="287" height="283" alt="ScreenShot_2026-07-16_110325_420" src="https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager/blob/dev/ScreenShot_2026-07-16_110325_420.png" />
+* 官方PMOS电路示例
+<img width="287" height="283" alt="ScreenShot_2026-07-16_110325_420" src="https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager/blob/dev/ScreenShot_2026-07-16_110028_647.png" />
 
 
 ## 使用要求
-- 仅支持esp32及其变体，不支持esp8266
-- 只支持esp-idf框架
-
-
+- esp32及其变体
+- esp-idf框架
 
 ## 安装与使用
-### 1. 配置参数
+* yaml配置->引入外部组件：
+  ```
+  external_components:
+    - source:
+        type: git
+        url: https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager
+        ref: v2
+      components: [ zw111 ]
+  ```
 
-| 参数 | 类型 | 默认值 | 描述 |
-|------|------|--------|------|
-| `id` | string | — | 组件 ID,与备注储存绑定，更改id将导致指纹备注丢失 |
-| `uart_id` | ID | — | UART 总线 ID |
-| `web_port` | int | 8080 | Web 管理页面端口 |
-| `web_username` | string | "" | Web 认证用户名 |
-| `web_password` | string | "" | Web 认证密码 |
-| `connection_status` | binary_sensor | — | 模组连接状态 |
-| `sensor_check_status` | binary_sensor | — | 传感器校验结果 |
-| `fp_identify_action` | text_sensor | — | 验证结果文本 |
-| `identify_button` | button | — | 触发验证按钮 |
-| `sleep_button` | button | — | 触发休眠按钮（可选） |
+* yaml配置->uart组件
+  ```
+  uart:
+    - id: zw111_uart #自定义ID
+      tx_pin: GPIOx  #任意可用GPIO
+      rx_pin: GPIOx  #任意可用GPIO
+      baud_rate: 57600
+      data_bits: 8
+      stop_bits: 1
+      parity: NONE
+  ```
 
-### 2. 基础配置
+* yaml配置->zw111组件
+  ```
+  zw111:
+    - id: zw111_fp  #自定义ID
+      uart_id: zw111_uart  #对应上方uart ID
+      web_port: 8088  #自定义web访问端口
+      web_username: admin  #自定义web登录用户
+      web_password: admin  #自定义web登录密码
+      power_ctl_pin: GPIO10  #VCC供电控制，任意可用GPIO
+      touch_sense_pin: GPIO6  #触摸反馈，任意可用GPIO
 
-```yaml
-external_components:
-  - source:
-      type: git
-      url: https://github.com/gasment/esphome_zw111_fingerprint_with_web_manager
-      ref: main
-    components: [ zw111 ]
-esp32:
-  framework:
-    type: esp-idf
-    sdkconfig_options:
-      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "30"
-      CONFIG_ESP_INT_WDT_TIMEOUT_MS: "800"
-    advanced:
-      loop_task_stack_size: 10240
-uart:
-  - id: zw111_uart  
-    tx_pin: GPIO4  #任意可分配GPIO
-    rx_pin: GPIO5  #任意可分配GPIO
-    baud_rate: 57600
-    data_bits: 8
-    stop_bits: 1
-    parity: NONE
+      connection_status:
+        id: zw111_connection_status
 
-zw111:
-  - id: zw111_main
-    uart_id: zw111_uart
-    web_port: 8088 ##任意可分配端口
-    web_username: "admin"
-    web_password: "admin"
+      sensor_check_status:
+        id: zw111_sensor_check
+      
+      fp_identify_action:
+        id: zw111_fp_identify_action
 
-    connection_status:
-      name: "ZW111 Connection"
-      id: zw111_main_connection_status
+      identify_button:
+        id: zw111_identify_button
 
-    sensor_check_status:
-      name: "ZW111 Sensor Check"
-      id: zw111_main_sensor_check
+      sleep_button:
+        id: zw111_sleep_button
 
+      touch_sensor:
+        id: zw111_touch_sensor
+        filters:
+          - delayed_off: 1000ms
+  ```
+* yaml配置->自动化示例
+  - `fp_identify_action` 是一个 `text_sensor`，可以在 YAML 中配置 `on_value` 触发器：
+    ```
     fp_identify_action:
       name: "Fingerprint ID"
-      id: zw111_main_fp_identify_action
-
-    identify_button:
-      name: "Identify"
-      id: zw111_main_identify_button
-
-    sleep_button: 
-      name: "Sleep"
-      id: zw111_main_sleep_button
-```
-
-### 3. 配合 GPIO 触发验证
-
-```yaml
-binary_sensor:
-  - platform: gpio
-    pin: GPIO6  #任意可分配GPIO
-    name: "Fingerprint Pressed"
-    icon: "mdi:fingerprint"
-    filters:
-      - delayed_off: 1500ms
-    on_press:
-      then:
-        - button.press: zw111_main_identify_button
-```
-
-### 4. 自动化示例
-
-`fp_identify_action` 是一个 `text_sensor`，可以在 YAML 中配置 `on_value` 触发器：
-
-```yaml
-fp_identify_action:
-  name: "Fingerprint ID"
-  id: zw111_main_fp_identify_action
-  on_value:
-    then:
-      - if:
-          condition:
-            lambda: 'return x == "myfinger";'
-          then:
-            - switch.toggle: my_switch
-```
-
----
+      id: zw111_identify_action
+      on_value:
+        then:
+          - if:
+              condition:
+                lambda: 'return x == "myfinger";'
+              then:
+                - switch.toggle: my_switch
+    ```
 
 
 
@@ -178,7 +154,7 @@ fp_identify_action:
 
 ## Web 管理页面
 
-默认访问 `http://device_ip:8080`进入：
+访问 `http://device_ip:xxxx`进入（AP模式默认为`http://192.168.4.1:xxxx`）：
 
 - **指纹管理标签页**
   - 100 个 ID 的网格视图，已注册 ID 绿色高亮
@@ -197,13 +173,8 @@ fp_identify_action:
 
 ## 其他说明
 
-### NVS 命名空间隔离
-
-组件支持多实例，每个实例的 NVS 键值使用实例的 `id` 作为前缀隔离（如 `zw111_main_n`、`zw111_main_c`），避免多模组场景下的数据冲突。
-
-- 指纹备注信息（ID 0-15）：存储在模组 Flash
-- 指纹备注信息（ID 16-99）：存储主控NVS分区
-- 配置数据：存储主控NVS分区。
-- 因此，更换主控或清空主控flash不会丢失0-15号指纹的备注信息，优先使用前16个位置。同时注意不要随意更改zw111组件的id配置,会丢失nvs数据
-- 指纹全部位于模组 Flash内，除非手动清空，否则不会丢失
+### 数据存储
+- 录入的指纹位于zw111内置Flash，更换主控或清空主控flash，不会丢失已录入的指纹
+- 指纹备注和配置数据存储在主控NVS分区，更换主控或清空主控flash会丢失以上信息
+- 触发sleep睡眠，会在主控的RTC内存写入睡眠标志，用于深度睡眠唤醒时的zw111快速初始化
 
