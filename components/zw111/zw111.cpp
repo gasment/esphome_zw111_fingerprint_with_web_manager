@@ -1340,17 +1340,29 @@ void ZW111Component::do_identify() {
   flush_input(); send_command(CMD_AUTO_IDENTIFY, id_params, 5);
   bool got_result = false, identify_success = false;
   uint32_t start = millis();
-  while (millis() - start < 10000) {
+  while (millis() - start < 5000) {
+    if (millis() - start >= 5000) break;
     if (this->available() < 9) { delay(10); continue; }
     uint8_t b1 = this->read(); if (b1 != PACKET_HEADER_HI) continue;
     if (this->available() < 1) { delay(1); continue; }
     uint8_t b2 = this->read(); if (b2 != PACKET_HEADER_LO) continue;
-    uint8_t addr[4]; if (!this->read_array(addr, 4)) continue;
-    uint8_t pkt_type; if (!this->read_array(&pkt_type, 1)) continue;
-    uint8_t len_buf[2]; if (!this->read_array(len_buf, 2)) continue;
+    // 替代 read_array: 逐字节读取, 每字节最多等 50ms, 超时则 continue 重新解析
+    uint8_t addr[4]; bool addr_ok = true;
+    for (int _i = 0; _i < 4 && addr_ok; _i++) {
+      uint32_t _t = millis() + 50; addr_ok = false;
+      while (millis() - start < 5000) { if (this->available()) { addr[_i] = this->read(); addr_ok = true; break; } if (millis() > _t) break; delay(1); }
+    }
+    if (!addr_ok) continue;
+    uint8_t pkt_type = 0; { uint32_t _t = millis() + 50; bool _ok = false; while (millis() - start < 5000) { if (this->available()) { pkt_type = this->read(); _ok = true; break; } if (millis() > _t) break; delay(1); } if (!_ok) continue; }
+    uint8_t len_buf[2] = {0, 0}; for (int _i = 0; _i < 2; _i++) { uint32_t _t = millis() + 50; bool _ok = false; while (millis() - start < 5000) { if (this->available()) { len_buf[_i] = this->read(); _ok = true; break; } if (millis() > _t) break; delay(1); } if (!_ok) { len_buf[0] = 0; break; } }
     uint16_t pkt_len = ((uint16_t)len_buf[0] << 8) | len_buf[1];
     if (pkt_len < 2 || pkt_len > 32) continue;
-    uint8_t payload[32] = {0}; if (!this->read_array(payload, pkt_len)) continue;
+    uint8_t payload[32] = {0}; bool payload_ok = true;
+    for (uint16_t _i = 0; _i < pkt_len && payload_ok; _i++) {
+      uint32_t _t = millis() + 50; payload_ok = false;
+      while (millis() - start < 5000) { if (this->available()) { payload[_i] = this->read(); payload_ok = true; break; } if (millis() > _t) break; delay(1); }
+    }
+    if (!payload_ok) continue;
     uint16_t plen = pkt_len - 2;
     uint8_t cs[3] = {pkt_type, len_buf[0], len_buf[1]};
     uint16_t csum = calc_checksum(cs, 3) + calc_checksum(payload, plen);
@@ -1392,9 +1404,15 @@ void ZW111Component::do_identify() {
     delay(5);
   }
   if (!got_result) {
-    ESP_LOGW(TAG, "[Identify] Timeout (no result in 10s)");
+    ESP_LOGW(TAG, "[Identify] Timeout (no result in 5s)");
     info_.last_result = "No Match";
     if (fp_identify_sensor_) fp_identify_sensor_->publish_state("No Match");
+  }
+  // 超时或无结果时先发送 Cancel 退出模块的 AutoIdentify 状态, 再控制 LED
+  if (!got_result || !identify_success) {
+    flush_input(); send_command(CMD_CANCEL);
+    { uint8_t junk; read_response(&junk, nullptr, 0, 300); }
+    flush_input(); delay(30);
   }
   if (identify_success) { delay(2000); led_all_off(); }
   else { led_all_off(); led_control(0x03, 0x04, 0x00, 0x00); delay(2000); led_all_off(); }
