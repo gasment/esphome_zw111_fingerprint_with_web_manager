@@ -10,8 +10,8 @@
 |---------|------|-----------|
 | Web实现 | esp_http_server | Mongoose 7.22 |
 | 指纹模组睡眠 |基础睡眠 | 完整唤醒逻辑|
-| ESP深度睡眠支持 |否 | 是|
-| VCC使能模式 | ESPHome通用组件(switch/output) | 专有配置|
+| ESP深度睡眠优化 |否 | 是|
+| VCC使能模式 | ESPHome通用组件(switch/output) | 专有配置（必须为高电平使能）|
 | 触摸传感器 | ESPHome通用组件(binary_sensor) | 专有配置 |
 
 * V2对V1存在破坏性更新，无法从V1迁移到V2
@@ -178,4 +178,19 @@
 - 录入的指纹位于zw111内置Flash，更换主控或清空主控flash，不会丢失已录入的指纹
 - 指纹备注和配置数据存储在主控NVS分区，更换主控或清空主控flash会丢失以上信息
 - 触发sleep睡眠，会在主控的RTC内存写入睡眠标志，用于深度睡眠唤醒时的zw111快速初始化
+
+### 深度睡眠
+- 必须在deep_sleep.enter前执行sleep_button的button.press,并给予一定时间等待，否则无法使用快速唤醒
+  示例：
+  ```
+  script:
+    - id: deep_sleep_mode_sequence
+      mode: single
+      then:
+        - button.press: zw111_sleep_button #zw111进入休眠
+        - lambda: |-
+                  ESP_LOGD("zw111", "zw111 entered sleep mode");
+        - delay: 200ms #等待完成            
+        - deep_sleep.enter: deep_sleep_main #进入休眠
+  ```
 
