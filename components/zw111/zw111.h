@@ -51,7 +51,7 @@ class ZW111Component : public Component, public uart::UARTDevice {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return esphome::setup_priority::BUS; }
+  float get_setup_priority() const override { return esphome::setup_priority::HARDWARE; }
 
   void set_connection_status(esphome::binary_sensor::BinarySensor *s) { connection_status_ = s; }
   void set_sensor_check_status(esphome::binary_sensor::BinarySensor *s) { sensor_check_status_ = s; }
@@ -68,6 +68,9 @@ class ZW111Component : public Component, public uart::UARTDevice {
   void trigger_sleep();
   void trigger_web_refresh();
   void power_on_and_init();
+  void initialize_later();
+  void populate_rtc_cache();
+  void restore_from_rtc_cache();
 
   // Mongoose HTTP handlers (direct)
   void handle_get_state(struct mg_connection *c);
@@ -184,6 +187,9 @@ class ZW111Component : public Component, public uart::UARTDevice {
   void save_sensor_check_nvs();
   void load_sensor_check_nvs();
 
+  bool wake_pending_{false};
+  uint32_t power_on_start_ms_{0};
+  uint32_t init_retry_delay_{0};
   bool nvs_has_index_cache_{false};
   bool initialized_{false};
   std::string nvs_prefix_;

@@ -10,8 +10,8 @@
 |---------|------|-----------|
 | Web实现 | esp_http_server | Mongoose 7.22 |
 | 指纹模组睡眠 |基础睡眠 | 完整唤醒逻辑|
-| ESP深度睡眠支持 |否 | 是|
-| VCC使能模式 | ESPHome通用组件(switch/output) | 专有配置|
+| ESP深度睡眠优化 |否 | 是|
+| VCC使能模式 | ESPHome通用组件(switch/output) | 专有配置（必须为高电平使能）|
 | 触摸传感器 | ESPHome通用组件(binary_sensor) | 专有配置 |
 
 * V2对V1存在破坏性更新，无法从V1迁移到V2
@@ -26,6 +26,7 @@
 - **指纹删除** — 单条删除、连续 ID 区间删除、清空全部指纹库
 - **备注管理** — 为每个指纹 ID 绑定最多 32 字符的字母/数字备注,NVS持久化存储
 - **自定义配置** — 验证置信度(1-5级)、录入采集次数(1-8次)、禁止重复注册开关
+- **深度睡眠快速启动** — 配合RTC缓存与阶段式初始化，从深度深眠唤醒到模块响应，时间低至1s
 
 
 ### 组件提供
@@ -51,7 +52,7 @@
 |---------|--------|-----------|-----------|
 | V_SENSOR | 1 | 触摸供电（3V3常供电） | --|
 | TOUCH_OUT | 2 | 触摸反馈/休眠唤醒 | 任意可用GPIO|
-| VCC | 3 | 模组供电（休眠） | 不需休眠则直连3V3,如需休眠需搭配PMOS电路,控制端连接任意可用GPIO|
+| VCC | 3 | 模组供电（休眠） | 不需休眠则直连3V3,如需休眠需搭配PMOS电路,控制端连接任意可用GPIO,必须为高电平唤醒|
 | TX | 4 |UART 发送 | 任意可用GPIO (RX) |
 | RX | 5 |UART 接收 | 任意可用GPIO(TX)  |
 | GND | 6 | 地 |--|
@@ -177,4 +178,19 @@
 - 录入的指纹位于zw111内置Flash，更换主控或清空主控flash，不会丢失已录入的指纹
 - 指纹备注和配置数据存储在主控NVS分区，更换主控或清空主控flash会丢失以上信息
 - 触发sleep睡眠，会在主控的RTC内存写入睡眠标志，用于深度睡眠唤醒时的zw111快速初始化
+
+### 深度睡眠
+- 必须在deep_sleep.enter前执行sleep_button的button.press,并给予一定时间等待，否则无法使用快速唤醒
+  示例：
+  ```
+  script:
+    - id: deep_sleep_mode_sequence
+      mode: single
+      then:
+        - button.press: zw111_sleep_button #zw111进入休眠
+        - lambda: |-
+                  ESP_LOGD("zw111", "zw111 entered sleep mode");
+        - delay: 200ms #等待完成            
+        - deep_sleep.enter: deep_sleep_main #进入休眠
+  ```
 

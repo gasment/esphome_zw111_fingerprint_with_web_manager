@@ -22,6 +22,33 @@ static const char *const TAG = "zw111";
 // Single component pointer for Mongoose static handler
 static ZW111Component *s_component = nullptr;
 
+// ===== RTC 缓存结构 (深度睡眠保留, 断电丢失) =====
+static RTC_DATA_ATTR struct {
+  bool valid;
+  uint32_t device_addr;
+  uint8_t  score_level;
+  uint8_t  reserv0[3];
+  char product_sn[16];
+  char software_ver[16];
+  char manufacturer[16];
+  char sensor_name[16];
+  char led_type[16];
+  char sensor_size[16];
+  uint16_t database_size;
+  uint16_t template_size;
+  uint16_t templates_per_finger;
+  uint32_t baud_rate;
+  char sensor_check_result[16];
+  uint8_t enrolled_bitmap[13];
+  uint8_t enroll_max;
+  uint8_t dup_block;
+  uint16_t stored_count;
+  uint8_t reserv2[2];
+  bool  touch_pre_state;
+  uint8_t reserv1[3];
+  bool  was_sleeping;
+} s_rtc = {false};
+
 // ===== UART 协议 =====
 
 uint16_t ZW111Component::calc_checksum(const uint8_t *data, uint16_t len) {
@@ -135,7 +162,6 @@ void ZW111Component::save_setting_to_nvs(const char *key, uint8_t value) {
 }
 
 void ZW111Component::apply_score_level_to_module(uint8_t level) {
-  // PS_WriteReg写入ZW111 Flash, 掉电不丢失, 仅冷启动时需要
   uint8_t reg_params[2] = {0x05, level};
   flush_input();
   send_command(CMD_WRITE_REG, reg_params, 2);
@@ -148,7 +174,6 @@ void ZW111Component::apply_score_level_to_module(uint8_t level) {
   }
 }
 
-// NVS持久化设备地址 (唤醒时无需UART读取)
 void ZW111Component::save_device_addr_nvs() {
   nvs_handle_t handle;
   std::string ns = nvs_cfg();
@@ -179,7 +204,6 @@ bool ZW111Component::load_device_addr_nvs() {
   return false;
 }
 
-// NVS持久化静态模块信息 (唤醒时无需UART读取ReadAddPara/ReadInfPage)
 void ZW111Component::save_info_nvs() {
   nvs_handle_t handle;
   std::string ns = nvs_cfg();
@@ -199,7 +223,6 @@ void ZW111Component::save_info_nvs() {
   }
 }
 
-// sensor_check_result NVS持久化 (冷启动时保存, 唤醒时直接读)
 void ZW111Component::save_sensor_check_nvs() {
   nvs_handle_t handle;
   std::string ns = nvs_cfg();
@@ -224,7 +247,7 @@ void ZW111Component::load_sensor_check_nvs() {
     }
     nvs_close(handle);
   }
-  info_.sensor_check_result = "";  // 无缓存时置空
+  info_.sensor_check_result = "";
 }
 
 bool ZW111Component::load_info_nvs() {
@@ -244,7 +267,6 @@ bool ZW111Component::load_info_nvs() {
       u16 = 0; if (nvs_get_u16(handle, "tmpl_sz", &u16) == ESP_OK) info_.template_size = u16;
       u16 = 0; if (nvs_get_u16(handle, "tmpl_pf", &u16) == ESP_OK) info_.templates_per_finger = u16;
       uint32_t u32 = 0; if (nvs_get_u32(handle, "baud", &u32) == ESP_OK) info_.baud_rate = u32;
-      // 确保device_addr hex字符串一致
       char h[16]; snprintf(h, 16, "0x%08X", device_addr_); info_.device_addr = h;
       nvs_close(handle);
       return true;
@@ -485,16 +507,8 @@ ZW111Component::~ZW111Component() {
   }
 }
 
-// RTC内存: deepsleep时保留, 断电丢失
-// 所有实例共享同一标记 - deep sleep是MCU级别操作, 一个实例触发sleep全部受影响
-// 多实例场景下正确性: 任一实例sleep→全体fast init; 断电重启→RTC丢失→全体cold start
-static RTC_DATA_ATTR bool s_was_sleeping = false;
-
 void ZW111Component::power_on_and_init() {
-  // 检查是否从sleep唤醒
-  // - deepsleep唤醒: RTC内存保留, s_was_sleeping=true
-  // - 断电重启: RTC内存丢失, s_was_sleeping=false (cold start)
-  bool was_sleeping = s_was_sleeping;
+  bool was_sleeping = s_rtc.was_sleeping;
   if (was_sleeping) {
     ESP_LOGI(TAG, "Waking from deepsleep (fast init)");
   }
@@ -514,12 +528,10 @@ void ZW111Component::power_on_and_init() {
   if (!ok) {
     if (connection_status_) connection_status_->publish_state(false);
     initialized_ = false;
-    // 唤醒失败不清除sleep标记, 保留供下次重试
     return;
   }
 
   if (was_sleeping) {
-    // 快速唤醒: 仅恢复设备地址+NVS信息, 跳过UART操作
     if (!load_device_addr_nvs()) {
       flush_input(); delay(10);
       if (!send_command(CMD_READ_SYS_PARA)) return;
@@ -532,14 +544,11 @@ void ZW111Component::power_on_and_init() {
       }
     }
     load_info_nvs();
-    // 从NVS恢复传感器校准状态 (冷启动时已持久化到NVS, 唤醒无需UART命令)
     load_sensor_check_nvs();
-    // 跳过: do_read_count, AutoIdentify+Cancel (唤醒后立即verify, 无需额外初始化)
     if (connection_status_) connection_status_->publish_state(true);
     if (fp_identify_sensor_) fp_identify_sensor_->publish_state("-");
     led_all_off();
   } else {
-    // 首次冷启动: 完整初始化
     flush_input(); delay(30); do_read_para(); flush_input(); delay(30); do_read_count();
     load_all_notepads();
     load_settings_from_nvs();
@@ -567,20 +576,18 @@ void ZW111Component::power_on_and_init() {
       uint8_t dummy; read_response(&dummy, nullptr, 0, 500);
       flush_input(); delay(30);
     }
-    // 冷启动完成后, 缓存设备和模块信息到NVS供下次唤醒使用
     save_device_addr_nvs();
     save_info_nvs();
     save_sensor_check_nvs();
+    populate_rtc_cache();
   }
 
   initialized_ = true;
-  // 清除RTC sleep标记, 确保下次冷启动或模块重启时走完整初始化流程
   if (was_sleeping) {
-    s_was_sleeping = false;
+    s_rtc.was_sleeping = false;
   }
   ESP_LOGI(TAG, "ZW111 init complete (was_sleeping=%d)", was_sleeping);
 
-  // Sleep唤醒后立即检查touch sensor状态, 若为true则自动进入指纹验证
   if (was_sleeping && touch_sense_pin_ != nullptr && touch_sensor_ != nullptr) {
     if (touch_sense_pin_->digital_read()) {
       ESP_LOGI(TAG, "Touch sensor active after wake, auto-triggering identify");
@@ -592,19 +599,20 @@ void ZW111Component::power_on_and_init() {
 void ZW111Component::setup() {
   s_component = this;
 
-  // Toush sense pin
   if (touch_sense_pin_ != nullptr) {
     touch_sense_pin_->setup();
   }
 
-  // Deepsleep唤醒: 检查RTC内存标记
-  // RTC_DATA_ATTR在deepsleep时保留, 断电时丢失
-  // 因此: deepsleep唤醒→true, 断电重启→false(cold start)
-  if (s_was_sleeping) {
+  if (s_rtc.was_sleeping) {
     if (power_ctl_pin_ != nullptr) {
       power_ctl_pin_->setup();
+      power_ctl_pin_->digital_write(true);
     }
-    power_on_and_init();
+    power_on_start_ms_ = millis();
+    s_rtc.touch_pre_state = (touch_sense_pin_ != nullptr) ? touch_sense_pin_->digital_read() : false;
+    wake_pending_ = true;
+    initialized_ = false;
+    ESP_LOGD(TAG, "Wake: power on at %ums, touch=%d, will init later", power_on_start_ms_, (int)s_rtc.touch_pre_state);
     return;
   }
 
@@ -651,18 +659,124 @@ void ZW111Component::setup() {
     uint8_t dummy; read_response(&dummy, nullptr, 0, 500);
     flush_input(); delay(30);
   }
-  // 冷启动完成后, 缓存设备和模块信息到NVS供下次唤醒或Web访问使用
   save_device_addr_nvs();
   save_info_nvs();
   save_sensor_check_nvs();
+  populate_rtc_cache();
   initialized_ = true;
   ESP_LOGI(TAG, "ZW111 ready");
 }
 
 static uint32_t last_touch_read_ms = 0;
 
+// ===== RTC 缓存填充/恢复 =====
+
+void ZW111Component::populate_rtc_cache() {
+  s_rtc.valid = true;
+  s_rtc.device_addr = device_addr_;
+  s_rtc.score_level = (uint8_t)info_.score_level;
+  s_rtc.database_size = (uint16_t)info_.database_size;
+  s_rtc.template_size = (uint16_t)info_.template_size;
+  s_rtc.templates_per_finger = (uint16_t)info_.templates_per_finger;
+  s_rtc.baud_rate = (uint32_t)info_.baud_rate;
+  s_rtc.enroll_max = setting_enroll_max_;
+  s_rtc.dup_block = setting_dup_block_;
+  snprintf(s_rtc.product_sn, sizeof(s_rtc.product_sn), "%s", info_.product_sn.c_str());
+  snprintf(s_rtc.software_ver, sizeof(s_rtc.software_ver), "%s", info_.software_ver.c_str());
+  snprintf(s_rtc.manufacturer, sizeof(s_rtc.manufacturer), "%s", info_.manufacturer.c_str());
+  snprintf(s_rtc.sensor_name, sizeof(s_rtc.sensor_name), "%s", info_.sensor_name.c_str());
+  snprintf(s_rtc.led_type, sizeof(s_rtc.led_type), "%s", info_.led_type.c_str());
+  snprintf(s_rtc.sensor_size, sizeof(s_rtc.sensor_size), "%s", info_.sensor_size.c_str());
+  if (!info_.sensor_check_result.empty()) {
+    snprintf(s_rtc.sensor_check_result, sizeof(s_rtc.sensor_check_result), "%s", info_.sensor_check_result.c_str());
+  }
+  memset(s_rtc.enrolled_bitmap, 0, sizeof(s_rtc.enrolled_bitmap));
+  for (int i = 0; i < 100; i++) {
+    if (enrolled_[i]) s_rtc.enrolled_bitmap[i / 8] |= (1 << (i % 8));
+  }
+  s_rtc.stored_count = (uint16_t)info_.stored_count;
+  s_rtc.touch_pre_state = (touch_sense_pin_ != nullptr) ? touch_sense_pin_->digital_read() : false;
+  ESP_LOGD(TAG, "RTC cache populated (%d bytes)", (int)sizeof(s_rtc));
+}
+
+void ZW111Component::restore_from_rtc_cache() {
+  if (!s_rtc.valid) return;
+  device_addr_ = s_rtc.device_addr;
+  info_.score_level = s_rtc.score_level;
+  info_.database_size = s_rtc.database_size;
+  info_.template_size = s_rtc.template_size;
+  info_.templates_per_finger = s_rtc.templates_per_finger;
+  info_.baud_rate = s_rtc.baud_rate;
+  info_.product_sn = s_rtc.product_sn;
+  info_.software_ver = s_rtc.software_ver;
+  info_.manufacturer = s_rtc.manufacturer;
+  info_.sensor_name = s_rtc.sensor_name;
+  info_.led_type = s_rtc.led_type;
+  info_.sensor_size = s_rtc.sensor_size;
+  info_.sensor_check_result = s_rtc.sensor_check_result;
+  char h[16]; snprintf(h, 16, "0x%08X", device_addr_); info_.device_addr = h;
+  setting_enroll_max_ = s_rtc.enroll_max;
+  setting_dup_block_ = s_rtc.dup_block;
+  memset(enrolled_, 0, sizeof(enrolled_));
+  for (int i = 0; i < 100; i++) {
+    enrolled_[i] = (s_rtc.enrolled_bitmap[i / 8] & (1 << (i % 8))) != 0;
+  }
+  nvs_has_index_cache_ = true;
+  info_.stored_count = s_rtc.stored_count;
+  ESP_LOGD(TAG, "RTC cache restored (stored_count=%.0f)", info_.stored_count);
+}
+
+// ===== 分阶段初始化: 在第一次loop()中完成UART握手 =====
+
+void ZW111Component::initialize_later() {
+  uint32_t elapsed = millis() - power_on_start_ms_;
+  ESP_LOGD(TAG, "ZW111 has been powered for %dms, starting delayed init", elapsed);
+
+  flush_input();
+  uint32_t wait_0x55 = (elapsed > 100) ? 40 : 100;
+  uint32_t t = millis(); bool got = false;
+  while (millis() - t < wait_0x55) { if (this->available() && this->read() == 0x55) { got = true; break; } delay(2); }
+  if (!got) { delay(30); }
+
+  if (!do_handshake()) {
+    ESP_LOGW(TAG, "Delayed handshake failed, retrying with fresh init...");
+    flush_input(); delay(30);
+    if (!do_handshake()) {
+      if (connection_status_) connection_status_->publish_state(false);
+      ESP_LOGE(TAG, "Delayed init failed after power-on");
+      wake_pending_ = false;
+      return;
+    }
+  }
+
+  restore_from_rtc_cache();
+
+  if (connection_status_) connection_status_->publish_state(true);
+
+  if (s_rtc.touch_pre_state) {
+    s_rtc.was_sleeping = false;
+    initialized_ = true;
+    wake_pending_ = false;
+    ESP_LOGI(TAG, "ZW111 delayed init complete (touch active, fast identify)");
+    if (fp_identify_sensor_) fp_identify_sensor_->publish_state("-");
+    // 第一时间闪烁蓝灯, 给用户触控唤醒即开始的视觉反馈
+    led_blue_blink();
+    trigger_identify();
+    return;
+  }
+
+  if (fp_identify_sensor_) fp_identify_sensor_->publish_state("-");
+  led_all_off();
+
+
+  s_rtc.was_sleeping = false;
+  initialized_ = true;
+  wake_pending_ = false;
+
+  ESP_LOGI(TAG, "ZW111 delayed init complete (power-on->ready: %dms)", millis() - power_on_start_ms_);
+}
+
 void ZW111Component::trigger_web_refresh() {
-  // 标记需要后台刷新数据 (was_sleep唤醒后, web首次访问时触发)
   if (initialized_ && !web_refresh_triggered_) {
     web_refresh_triggered_ = true;
     ESP_LOGI(TAG, "Web refresh triggered, will refresh UART data in loop()");
@@ -670,18 +784,20 @@ void ZW111Component::trigger_web_refresh() {
 }
 
 void ZW111Component::loop() {
-  // Web触发后台UART刷新: was_sleep唤醒后首次web访问时更新
+  if (wake_pending_) {
+    initialize_later();
+    if (!initialized_) return;
+  }
+
   if (initialized_ && web_refresh_triggered_) {
     web_refresh_triggered_ = false;
     ESP_LOGI(TAG, "Executing background UART refresh for web...");
-    // 只从NVS加载IndexTable, 避免发送UART命令触发模块误动作
     if (!nvs_has_index_cache_) {
       load_index_table_from_nvs();
     }
     load_settings_from_nvs();
   }
 
-  // Touch sense 轮询：sleep模式10ms快速响应, 正常模式50ms节省CPU
   if (touch_sense_pin_ != nullptr && touch_sensor_ != nullptr) {
     uint32_t interval = initialized_ ? 50 : 10;
     if (millis() - last_touch_read_ms >= interval) {
@@ -691,7 +807,6 @@ void ZW111Component::loop() {
   }
 
   if (!initialized_) {
-    // Sleep模式: 仅轮询touch, 不处理其他逻辑
     return;
   }
   flush_dirty_notepad();
@@ -718,7 +833,6 @@ bool ZW111Component::check_auth(const std::string &header_value) {
   if (web_user_.empty()) return true;
   std::string exp = web_user_ + ":" + web_pass_;
   char enc[128]; size_t elen = 0;
-  // Base64 encode
   for (size_t i = 0; i < exp.size(); i += 3) {
     uint32_t bits = ((uint8_t)exp[i]) << 16;
     if (i+1 < exp.size()) bits |= ((uint8_t)exp[i+1]) << 8;
@@ -734,7 +848,6 @@ bool ZW111Component::check_auth(const std::string &header_value) {
 
 // ===== Mongoose HTTP Handler =====
 
-// 必须用宏才能与相邻字符串字面量拼接
 #define CORS_HDRS "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Auth-Credentials\r\n"
 
 static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
@@ -745,15 +858,12 @@ static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 
     struct mg_str uri = hm->uri;
 
-    // Handle OPTIONS preflight (CORS)
     if (mg_strcmp(mg_str("OPTIONS"), hm->method) == 0) {
       mg_http_reply(c, 200, CORS_HDRS, "");
       return;
     }
 
-    // Serve index page (no auth required so login UI can load)
     if (mg_strcmp(uri, mg_str("/")) == 0 || mg_strcmp(uri, mg_str("/index.html")) == 0) {
-      // 用户打开web页面时, 触发后台UART数据刷新 (was_sleep后用真实数据更新)
       self->trigger_web_refresh();
       mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n" CORS_HDRS
                 "Content-Length: %d\r\n\r\n", (int) strlen(ZW111_HTML));
@@ -761,7 +871,6 @@ static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
       return;
     }
 
-    // Auth check for API routes
     struct mg_str *auth_hdr = mg_http_get_header(hm, "X-Auth-Credentials");
     std::string auth_str(auth_hdr ? (auth_hdr->buf ? auth_hdr->buf : "") : "", auth_hdr ? auth_hdr->len : 0);
     if (!self->check_auth(auth_str)) {
@@ -824,7 +933,6 @@ void ZW111Component::start_mongoose_server() {
 
 void ZW111Component::handle_get_state(struct mg_connection *c) {
   char buf[1200];
-  // 如果sensor_check_result为空, 返回"未检测"而非空字符串
   const char *scr = info_.sensor_check_result.empty() ? "未检测" : info_.sensor_check_result.c_str();
   snprintf(buf, sizeof(buf),
     "{\"Product_SN\":\"%s\",\"Software_Ver\":\"%s\",\"Manufacturer\":\"%s\",\"Sensor_Name\":\"%s\",\"Device_Address\":\"%s\",\"LED_Type\":\"%s\",\"Sensor_Size\":\"%s\",\"Enroll_Count\":%.0f,\"Template_Size\":%.0f,\"Database_Size\":%.0f,\"Score_Level\":%.0f,\"Baud_Rate\":%.0f,\"Templates_Per_Finger\":%.0f,\"Stored_Count\":%.0f,\"Last_Result\":\"%s\",\"Sensor_Check_Result\":\"%s\"}",
@@ -844,7 +952,6 @@ void ZW111Component::handle_get_settings(struct mg_connection *c) {
 }
 
 void ZW111Component::handle_get_enrolled(struct mg_connection *c) {
-  // 懒加载: 唤醒后首次Web访问时从NVS读取IndexTable
   if (!nvs_has_index_cache_) {
     load_index_table_from_nvs();
   }
@@ -858,16 +965,13 @@ void ZW111Component::handle_get_enrolled(struct mg_connection *c) {
 }
 
 void ZW111Component::handle_get_all_notepads(struct mg_connection *c) {
-  // 批量返回所有notepad, 避免Web前端逐个请求100次
   std::string json = "{\"notepads\":[";
   for (int i = 0; i < 100; i++) {
-    // 懒加载: 唤醒后首次Web访问时按需从NVS读取
     if (notepad_cache_[i].empty()) {
       notepad_cache_[i] = read_notepad_nvs(i);
     }
     if (i > 0) json += ",";
     json += "\"";
-    // 转义特殊字符
     for (size_t j = 0; j < notepad_cache_[i].length(); j++) {
       char c = notepad_cache_[i][j];
       if (c == '"' || c == '\\') json += "\\";
@@ -880,19 +984,13 @@ void ZW111Component::handle_get_all_notepads(struct mg_connection *c) {
 }
 
 void ZW111Component::handle_get_init(struct mg_connection *c) {
-  // 初始化API: 一次性返回所有数据, 前端显示loading等待
-  // 不发送任何UART命令 (was_sleep路径下模块可能处于响应状态, 发命令会误触发)
-
-  // 加载IndexTable (懒加载: 从NVS读)
   if (!nvs_has_index_cache_) {
     load_index_table_from_nvs();
   }
 
-  // 从NVS加载模块静态信息 (冷启动时do_read_para()已保存到NVS)
   load_info_nvs();
   load_sensor_check_nvs();
 
-  // 构建enrolled数组
   std::string enrolled_json = "[";
   for (int i = 0; i < 100; i++) {
     if (i > 0) enrolled_json += ",";
@@ -900,7 +998,6 @@ void ZW111Component::handle_get_init(struct mg_connection *c) {
   }
   enrolled_json += "]";
 
-  // 构建notepads数组 (懒加载)
   std::string notepads_json = "[";
   for (int i = 0; i < 100; i++) {
     if (notepad_cache_[i].empty()) {
@@ -917,7 +1014,6 @@ void ZW111Component::handle_get_init(struct mg_connection *c) {
   }
   notepads_json += "]";
 
-  // 构建state
   const char *scr = info_.sensor_check_result.empty() ? "未检测" : info_.sensor_check_result.c_str();
   char state_buf[1200];
   snprintf(state_buf, sizeof(state_buf),
@@ -927,13 +1023,11 @@ void ZW111Component::handle_get_init(struct mg_connection *c) {
     info_.enroll_count, info_.template_size, info_.database_size, info_.score_level, info_.baud_rate, info_.templates_per_finger, info_.stored_count, info_.last_result.c_str(),
     scr);
 
-  // settings
   char settings_buf[256];
   snprintf(settings_buf, sizeof(settings_buf),
     "{\"score_level\":%d,\"enroll_max\":%d,\"dup_block\":%d}",
     (int)info_.score_level, setting_enroll_max_, setting_dup_block_);
 
-  // 拼接完整响应 (notepads可能有100条数据, 需要足够大的buffer)
   std::string resp = "{\"state\":";
   resp += state_buf;
   resp += ",\"enrolled\":";
@@ -1018,7 +1112,6 @@ void ZW111Component::handle_post_action(struct mg_connection *c, const char *act
     }
   } else if (strcmp(action, "read_notepad") == 0) {
     std::string content;
-    // 懒加载: 唤醒后首次Web访问时按需从NVS读取
     if (page_id >= 0 && page_id < 100) {
       if (notepad_cache_[page_id].empty()) {
         notepad_cache_[page_id] = read_notepad_nvs(page_id);
@@ -1267,7 +1360,6 @@ void ZW111Component::do_identify() {
     if (confirm == CONFIRM_OK && param1 == 0x05) {
       uint16_t match_id = ((uint16_t)payload[2] << 8) | payload[3];
       uint16_t score = ((uint16_t)payload[4] << 8) | payload[5];
-      // 按需读取单个notepad (唤醒时未预加载缓存, 直接从NVS读)
       if (notepad_cache_[match_id].empty()) {
         notepad_cache_[match_id] = read_notepad_nvs(match_id);
       }
@@ -1340,8 +1432,20 @@ void ZW111Component::trigger_sleep() {
     ESP_LOGW(TAG, "Sleep command: no response");
   }
   initialized_ = false;
-  // 设置RTC内存sleep标记: deepsleep唤醒时保留, 断电丢失
-  s_was_sleeping = true;
+  s_rtc.was_sleeping = true;
+  if (s_rtc.valid) {
+    s_rtc.touch_pre_state = (touch_sense_pin_ != nullptr) ? touch_sense_pin_->digital_read() : false;
+    memset(s_rtc.enrolled_bitmap, 0, sizeof(s_rtc.enrolled_bitmap));
+    for (int i = 0; i < 100; i++) {
+      if (enrolled_[i]) s_rtc.enrolled_bitmap[i / 8] |= (1 << (i % 8));
+    }
+    s_rtc.enroll_max = setting_enroll_max_;
+    s_rtc.dup_block = setting_dup_block_;
+    if (!info_.sensor_check_result.empty()) {
+      snprintf(s_rtc.sensor_check_result, sizeof(s_rtc.sensor_check_result), "%s", info_.sensor_check_result.c_str());
+    }
+  }
+  s_rtc.valid = true;
   if (power_ctl_pin_ != nullptr) {
     delay(50);
     power_ctl_pin_->digital_write(false);
