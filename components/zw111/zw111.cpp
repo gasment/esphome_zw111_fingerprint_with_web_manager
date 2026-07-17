@@ -1340,7 +1340,7 @@ void ZW111Component::do_identify() {
   flush_input(); send_command(CMD_AUTO_IDENTIFY, id_params, 5);
   bool got_result = false, identify_success = false;
   uint32_t start = millis();
-  while (millis() - start < 10000) {
+  while (millis() - start < 5000) {
     if (this->available() < 9) { delay(10); continue; }
     uint8_t b1 = this->read(); if (b1 != PACKET_HEADER_HI) continue;
     if (this->available() < 1) { delay(1); continue; }
