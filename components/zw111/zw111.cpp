@@ -1408,6 +1408,12 @@ void ZW111Component::do_identify() {
     info_.last_result = "No Match";
     if (fp_identify_sensor_) fp_identify_sensor_->publish_state("No Match");
   }
+  // 超时或无结果时先发送 Cancel 退出模块的 AutoIdentify 状态, 再控制 LED
+  if (!got_result || !identify_success) {
+    flush_input(); send_command(CMD_CANCEL);
+    { uint8_t junk; read_response(&junk, nullptr, 0, 300); }
+    flush_input(); delay(30);
+  }
   if (identify_success) { delay(2000); led_all_off(); }
   else { led_all_off(); led_control(0x03, 0x04, 0x00, 0x00); delay(2000); led_all_off(); }
   if (fp_identify_sensor_) fp_identify_sensor_->publish_state("-");
