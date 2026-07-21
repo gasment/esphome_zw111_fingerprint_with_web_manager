@@ -66,7 +66,7 @@
 - esp-idf框架
 
 ## 安装与使用
-* 需要使用platformio工具链编译
+* esphome版本>=2026.7.0时，需要使用platformio工具链编译，暂未兼容esp-idf编译
   ```
   esp32:
   variant: esp32xxx #芯片型号
