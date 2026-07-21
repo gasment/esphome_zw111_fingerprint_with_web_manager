@@ -66,6 +66,20 @@
 - esp-idf框架
 
 ## 安装与使用
+* 需要使用platformio工具链编译
+  ```
+  esp32:
+  variant: esp32xxx #芯片型号
+  watchdog_timeout: 15s
+  toolchain: platformio
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "30"
+      CONFIG_ESP_INT_WDT_TIMEOUT_MS: "800"
+    advanced:
+      loop_task_stack_size: 10240
+  ```
 * yaml配置->引入外部组件：
   ```
   external_components:
