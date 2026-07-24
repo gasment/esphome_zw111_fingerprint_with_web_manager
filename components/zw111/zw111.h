@@ -6,6 +6,7 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/button/button.h"
+#include <freertos/FreeRTOS.h>
 
 namespace esphome {
 namespace zw111 {
@@ -124,9 +125,14 @@ class ZW111Component : public Component, public uart::UARTDevice {
 
   // Mongoose event manager (public for static handler)
   struct mg_mgr mgr_;
+  struct mg_connection *listener_{nullptr};
   bool mgr_inited_{false};
+  uint32_t web_last_start_attempt_ms_{0};
+  uint32_t web_last_poll_ms_{0};
 
-  void start_mongoose_server();
+  bool start_mongoose_server();
+  void stop_mongoose_server();
+  bool network_ready_for_web() const;
   bool check_auth(const std::string &header_value);  // public: used by static mg_ev_handler
 
  protected:
@@ -164,11 +170,12 @@ class ZW111Component : public Component, public uart::UARTDevice {
     std::string sensor_check_result;
   } info_;
 
-  std::string notepad_cache_[100];
   bool        notepad_dirty_[100]{};
+  std::string notepads_json_cache_;
+  bool        notepads_json_dirty_{true};
 
   void flush_dirty_notepad();
-  void load_all_notepads();
+  void rebuild_notepads_json_cache();
   void write_notepad_nvs(int id, const std::string &content);
   std::string read_notepad_nvs(int id);
 

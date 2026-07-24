@@ -1,4 +1,7 @@
 """ZW111 Hailingke Fingerprint Module - ESPHome External Component."""
+import gzip
+from pathlib import Path
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import uart, binary_sensor, text_sensor, button
@@ -7,6 +10,36 @@ from esphome.const import (
     ENTITY_CATEGORY_DIAGNOSTIC,
 )
 from esphome import pins
+
+
+def _generate_web_asset():
+    component_dir = Path(__file__).resolve().parent
+    source = component_dir / "zw111_web_source.html"
+    header_path = component_dir / "zw111_web.h"
+    raw = source.read_bytes()
+    compressed = gzip.compress(raw, compresslevel=9, mtime=0)
+    rows = []
+    for offset in range(0, len(compressed), 16):
+        chunk = compressed[offset : offset + 16]
+        rows.append("  " + ", ".join(f"0x{value:02X}" for value in chunk) + ",")
+    header = (
+        "#pragma once\n\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n\n"
+        "namespace esphome {\n"
+        "namespace zw111 {\n\n"
+        "inline constexpr uint8_t ZW111_HTML_GZIP[] = {\n"
+        + "\n".join(rows)
+        + "\n};\n"
+        "inline constexpr size_t ZW111_HTML_GZIP_LEN = sizeof(ZW111_HTML_GZIP);\n\n"
+        "}  // namespace zw111\n"
+        "}  // namespace esphome\n"
+    )
+    if not header_path.exists() or header_path.read_text(encoding="utf-8") != header:
+        header_path.write_text(header, encoding="utf-8", newline="\n")
+
+
+_generate_web_asset()
 
 DEPENDENCIES = ["uart"]
 AUTO_LOAD = ["binary_sensor", "text_sensor", "button"]
