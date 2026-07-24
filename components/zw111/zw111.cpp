@@ -428,22 +428,30 @@ std::string ZW111Component::read_notepad_nvs(int id) {
   return "";
 }
 
-void ZW111Component::load_all_notepads() {
-  if (load_index_table_from_nvs()) {
-    nvs_has_index_cache_ = true;
-    ESP_LOGI(TAG, "IndexTable loaded from NVS cache");
-  }
+void ZW111Component::rebuild_notepads_json_cache() {
+  std::string json = "[";
+  json.reserve(2048);
   for (int i = 0; i < 100; i++) {
-    notepad_cache_[i] = read_notepad_nvs(i);
+    const std::string note = notepad_dirty_[i] ? std::string() : read_notepad_nvs(i);
+    if (i > 0) json += ",";
+    json += "\"";
+    for (const char value : note) {
+      if (value == '"' || value == '\\') json += "\\";
+      json += value;
+    }
+    json += "\"";
   }
-  ESP_LOGI(TAG, "Notepad cache loaded (100 entries) from NVS");
+  json += "]";
+  notepads_json_cache_ = std::move(json);
+  notepads_json_dirty_ = false;
 }
 
 void ZW111Component::flush_dirty_notepad() {
   for (int i = 0; i < 100; i++) {
     if (notepad_dirty_[i]) {
       notepad_dirty_[i] = false;
-      write_notepad_nvs(i, notepad_cache_[i]);
+      write_notepad_nvs(i, "");
+      notepads_json_dirty_ = true;
       return;
     }
   }
@@ -501,10 +509,7 @@ void ZW111Component::sync_index_table_from_uart() {
 // ===== 生命周期 =====
 
 ZW111Component::~ZW111Component() {
-  if (mgr_inited_) {
-    mg_mgr_free(&mgr_);
-    mgr_inited_ = false;
-  }
+  stop_mongoose_server();
 }
 
 void ZW111Component::power_on_and_init() {
@@ -550,7 +555,11 @@ void ZW111Component::power_on_and_init() {
     led_all_off();
   } else {
     flush_input(); delay(30); do_read_para(); flush_input(); delay(30); do_read_count();
-    load_all_notepads();
+    if (load_index_table_from_nvs()) {
+      nvs_has_index_cache_ = true;
+      ESP_LOGI(TAG, "IndexTable loaded from NVS cache");
+    }
+    rebuild_notepads_json_cache();
     load_settings_from_nvs();
     info_.enroll_count = setting_enroll_max_;
     if (info_.score_level >= 1 && info_.score_level <= 5) apply_score_level_to_module((uint8_t)info_.score_level);
@@ -631,7 +640,11 @@ void ZW111Component::setup() {
   if (!ok) { if (connection_status_) connection_status_->publish_state(false); mark_failed(); return; }
 
   flush_input(); delay(30); do_read_para(); flush_input(); delay(30); do_read_count();
-  load_all_notepads();
+  if (load_index_table_from_nvs()) {
+    nvs_has_index_cache_ = true;
+    ESP_LOGI(TAG, "IndexTable loaded from NVS cache");
+  }
+  rebuild_notepads_json_cache();
   load_settings_from_nvs();
   info_.enroll_count = setting_enroll_max_;
   if (info_.score_level >= 1 && info_.score_level <= 5) apply_score_level_to_module((uint8_t)info_.score_level);
@@ -759,9 +772,14 @@ void ZW111Component::initialize_later() {
     wake_pending_ = false;
     ESP_LOGI(TAG, "ZW111 delayed init complete (touch active, fast identify)");
     if (fp_identify_sensor_) fp_identify_sensor_->publish_state("-");
-    // 第一时间闪烁蓝灯, 给用户触控唤醒即开始的视觉反馈
-    led_blue_blink();
+    // 信任深睡前捕获的 touch_pre_state，先同步置位 identify_busy_ 并创建
+    // 快速识别任务，避免识别启动依赖 ESPHome 自动化调度。
     trigger_identify();
+    // 回到已经验证可工作的 ESPHome deferred 发布路径。快速识别已经
+    // 启动，on_press 中的 busy 判断会避免再次启动 UART task。
+    this->defer([this]() {
+      if (touch_sensor_) touch_sensor_->publish_state(true);
+    });
     return;
   }
 
@@ -787,6 +805,9 @@ void ZW111Component::loop() {
   if (wake_pending_) {
     initialize_later();
     if (!initialized_) return;
+    // initialize_later() 可能刚安排首次 touch 事件；不要在同一次 loop
+    // 末尾又从 GPIO 发布状态，让 deferred 事件保持唯一、确定的入口。
+    return;
   }
 
   if (initialized_ && web_refresh_triggered_) {
@@ -811,16 +832,19 @@ void ZW111Component::loop() {
   }
   flush_dirty_notepad();
 
-  if (!web_started_ && web_port_ > 0) {
-#ifdef USE_WIFI
-    if (wifi::global_wifi_component->can_proceed())
-#endif
-    {
-      web_started_ = true;
-      start_mongoose_server();
-    }
+  const bool network_ready = network_ready_for_web();
+  if (!network_ready) {
+    if (mgr_inited_) stop_mongoose_server();
+    return;
   }
-  if (mgr_inited_) {
+
+  const uint32_t now = millis();
+  if (!web_started_ && web_port_ > 0 && now - web_last_start_attempt_ms_ >= 1000) {
+    web_last_start_attempt_ms_ = now;
+    web_started_ = start_mongoose_server();
+  }
+  if (mgr_inited_ && now - web_last_poll_ms_ >= 10) {
+    web_last_poll_ms_ = now;
     mg_mgr_poll(&mgr_, 0);
   }
 }
@@ -865,14 +889,23 @@ static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 
     if (mg_strcmp(uri, mg_str("/")) == 0 || mg_strcmp(uri, mg_str("/index.html")) == 0) {
       self->trigger_web_refresh();
-      mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n" CORS_HDRS
-                "Content-Length: %d\r\n\r\n", (int) strlen(ZW111_HTML));
-      mg_send(c, ZW111_HTML, strlen(ZW111_HTML));
+      mg_printf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                "Content-Encoding: gzip\r\nCache-Control: no-store\r\n" CORS_HDRS
+                "Content-Length: %u\r\n\r\n", (unsigned) ZW111_HTML_GZIP_LEN);
+      mg_send(c, ZW111_HTML_GZIP, ZW111_HTML_GZIP_LEN);
       return;
     }
 
-    struct mg_str *auth_hdr = mg_http_get_header(hm, "X-Auth-Credentials");
+    struct mg_str *auth_hdr = mg_http_get_header(hm, "Authorization");
     std::string auth_str(auth_hdr ? (auth_hdr->buf ? auth_hdr->buf : "") : "", auth_hdr ? auth_hdr->len : 0);
+    static const char BASIC_PREFIX[] = "Basic ";
+    if (auth_str.compare(0, sizeof(BASIC_PREFIX) - 1, BASIC_PREFIX) == 0)
+      auth_str.erase(0, sizeof(BASIC_PREFIX) - 1);
+    else {
+      // Backward compatibility for clients using the pre-2026-07 custom header.
+      auth_hdr = mg_http_get_header(hm, "X-Auth-Credentials");
+      auth_str.assign(auth_hdr ? (auth_hdr->buf ? auth_hdr->buf : "") : "", auth_hdr ? auth_hdr->len : 0);
+    }
     if (!self->check_auth(auth_str)) {
       mg_http_reply(c, 200, CORS_HDRS, "{\"auth\":false}");
       return;
@@ -920,13 +953,37 @@ static void mg_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
   }
 }
 
-void ZW111Component::start_mongoose_server() {
+bool ZW111Component::network_ready_for_web() const {
+#ifdef USE_WIFI
+  return wifi::global_wifi_component != nullptr &&
+         (wifi::global_wifi_component->is_connected() || wifi::global_wifi_component->is_ap_active());
+#else
+  return false;
+#endif
+}
+
+bool ZW111Component::start_mongoose_server() {
+  if (mgr_inited_) return listener_ != nullptr;
   mg_mgr_init(&mgr_);
-  mgr_inited_ = true;
   char addr[32];
   snprintf(addr, sizeof(addr), "http://0.0.0.0:%d", web_port_);
-  mg_http_listen(&mgr_, addr, mg_ev_handler, this);
+  listener_ = mg_http_listen(&mgr_, addr, mg_ev_handler, this);
+  if (listener_ == nullptr) {
+    ESP_LOGW(TAG, "Mongoose HTTP listen failed on port %d; retrying", web_port_);
+    mg_mgr_free(&mgr_);
+    return false;
+  }
+  mgr_inited_ = true;
   ESP_LOGI(TAG, "Mongoose HTTP on port %d", web_port_);
+  return true;
+}
+
+void ZW111Component::stop_mongoose_server() {
+  if (mgr_inited_) mg_mgr_free(&mgr_);
+  listener_ = nullptr;
+  mgr_inited_ = false;
+  web_started_ = false;
+  web_last_poll_ms_ = 0;
 }
 
 // ===== REST handlers =====
@@ -965,21 +1022,11 @@ void ZW111Component::handle_get_enrolled(struct mg_connection *c) {
 }
 
 void ZW111Component::handle_get_all_notepads(struct mg_connection *c) {
-  std::string json = "{\"notepads\":[";
-  for (int i = 0; i < 100; i++) {
-    if (notepad_cache_[i].empty()) {
-      notepad_cache_[i] = read_notepad_nvs(i);
-    }
-    if (i > 0) json += ",";
-    json += "\"";
-    for (size_t j = 0; j < notepad_cache_[i].length(); j++) {
-      char c = notepad_cache_[i][j];
-      if (c == '"' || c == '\\') json += "\\";
-      json += c;
-    }
-    json += "\"";
-  }
-  json += "]}";
+  if (notepads_json_dirty_) rebuild_notepads_json_cache();
+  std::string json = "{\"notepads\":";
+  json.reserve(notepads_json_cache_.size() + 16);
+  json += notepads_json_cache_;
+  json += "}";
   mg_http_reply(c, 200, "", "%s\n", json.c_str());
 }
 
@@ -990,29 +1037,6 @@ void ZW111Component::handle_get_init(struct mg_connection *c) {
 
   load_info_nvs();
   load_sensor_check_nvs();
-
-  std::string enrolled_json = "[";
-  for (int i = 0; i < 100; i++) {
-    if (i > 0) enrolled_json += ",";
-    enrolled_json += enrolled_[i] ? "true" : "false";
-  }
-  enrolled_json += "]";
-
-  std::string notepads_json = "[";
-  for (int i = 0; i < 100; i++) {
-    if (notepad_cache_[i].empty()) {
-      notepad_cache_[i] = read_notepad_nvs(i);
-    }
-    if (i > 0) notepads_json += ",";
-    notepads_json += "\"";
-    for (size_t j = 0; j < notepad_cache_[i].length(); j++) {
-      char cc = notepad_cache_[i][j];
-      if (cc == '"' || cc == '\\') notepads_json += "\\";
-      notepads_json += cc;
-    }
-    notepads_json += "\"";
-  }
-  notepads_json += "]";
 
   const char *scr = info_.sensor_check_result.empty() ? "未检测" : info_.sensor_check_result.c_str();
   char state_buf[1200];
@@ -1029,11 +1053,20 @@ void ZW111Component::handle_get_init(struct mg_connection *c) {
     (int)info_.score_level, setting_enroll_max_, setting_dup_block_);
 
   std::string resp = "{\"state\":";
+  resp.reserve(4096);
   resp += state_buf;
-  resp += ",\"enrolled\":";
-  resp += enrolled_json;
-  resp += ",\"notepads\":";
-  resp += notepads_json;
+  resp += ",\"enrolled\":[";
+  for (int i = 0; i < 100; i++) {
+    if (i > 0) resp += ",";
+    resp += enrolled_[i] ? "true" : "false";
+  }
+  resp += "],\"notepads\":[";
+  if (notepads_json_dirty_) rebuild_notepads_json_cache();
+  // The cache already includes its surrounding brackets; the opening bracket
+  // above is replaced by appending only its contents.
+  if (notepads_json_cache_.size() >= 2)
+    resp.append(notepads_json_cache_.data() + 1, notepads_json_cache_.size() - 2);
+  resp += "]";
   resp += ",\"settings\":";
   resp += settings_buf;
   resp += "}";
@@ -1083,15 +1116,17 @@ void ZW111Component::handle_post_action(struct mg_connection *c, const char *act
     uint8_t confirm = 0xFF;
     if (read_response(&confirm) && confirm == CONFIRM_OK) {
       for (int i = page_id; i < page_id + count && i < 100; i++) {
-        notepad_cache_[i] = ""; notepad_dirty_[i] = true;
+        notepad_dirty_[i] = true;
       }
+      notepads_json_dirty_ = true;
       sync_index_table_from_uart();
       if (connection_status_) connection_status_->publish_state(true);
     }
   } else if (strcmp(action, "clear") == 0) {
     flush_input(); send_command(CMD_EMPTY);
     uint8_t confirm = 0xFF; read_response(&confirm);
-    for (int i = 0; i < 100; i++) { notepad_cache_[i] = ""; notepad_dirty_[i] = true; }
+    for (int i = 0; i < 100; i++) notepad_dirty_[i] = true;
+    notepads_json_dirty_ = true;
     sync_index_table_from_uart();
     if (connection_status_) connection_status_->publish_state(true);
   } else if (strcmp(action, "refresh") == 0) {
@@ -1106,17 +1141,13 @@ void ZW111Component::handle_post_action(struct mg_connection *c, const char *act
     const char *nc = strstr(body, "\"content\":\"");
     if (nc) { nc += 11; while (*nc && *nc != '"') content += *nc++; }
     if (page_id >= 0 && page_id < 100) {
-      notepad_cache_[page_id] = content;
-      notepad_dirty_[page_id] = true;
       write_notepad_nvs(page_id, content);
+      notepads_json_dirty_ = true;
     }
   } else if (strcmp(action, "read_notepad") == 0) {
     std::string content;
     if (page_id >= 0 && page_id < 100) {
-      if (notepad_cache_[page_id].empty()) {
-        notepad_cache_[page_id] = read_notepad_nvs(page_id);
-      }
-      content = notepad_cache_[page_id];
+      content = read_notepad_nvs(page_id);
     }
     char jbuf[160]; snprintf(jbuf, sizeof(jbuf), "{\"ok\":true,\"content\":\"%s\"}", content.c_str());
     mg_http_reply(c, 200, "", "%s\n", jbuf);
@@ -1133,8 +1164,9 @@ void ZW111Component::handle_post_action(struct mg_connection *c, const char *act
     uint8_t bconfirm = 0xFF;
     if (read_response(&bconfirm) && bconfirm == CONFIRM_OK) {
       for (int i = start_id; i <= end_id; i++) {
-        notepad_cache_[i] = ""; notepad_dirty_[i] = true;
+        notepad_dirty_[i] = true;
       }
+      notepads_json_dirty_ = true;
       sync_index_table_from_uart();
       if (connection_status_) connection_status_->publish_state(true);
       char jbuf[128]; snprintf(jbuf, sizeof(jbuf), "{\"ok\":true,\"msg\":\"Deleted ID %d-%d (%d)\"}\n", start_id, end_id, rcount);
@@ -1372,10 +1404,7 @@ void ZW111Component::do_identify() {
     if (confirm == CONFIRM_OK && param1 == 0x05) {
       uint16_t match_id = ((uint16_t)payload[2] << 8) | payload[3];
       uint16_t score = ((uint16_t)payload[4] << 8) | payload[5];
-      if (notepad_cache_[match_id].empty()) {
-        notepad_cache_[match_id] = read_notepad_nvs(match_id);
-      }
-      std::string note = notepad_cache_[match_id];
+      std::string note = read_notepad_nvs(match_id);
       ESP_LOGI(TAG, "[Identify] MATCH! pageID=%d score=%d note='%s'", match_id, score, note.c_str());
       if (!note.empty() && note.length() > 0) {
         if (fp_identify_sensor_) fp_identify_sensor_->publish_state(note);
