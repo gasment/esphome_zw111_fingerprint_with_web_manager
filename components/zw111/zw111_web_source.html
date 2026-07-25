@@ -206,7 +206,7 @@ function doLogin(){
   fetch('/api/state',{headers:{'Authorization':'Basic '+cred}}).then(function(r){return r.json()}).then(function(d){
     if(d.auth===false){_pendingAuthCreds=null;sessionStorage.removeItem('zw111_auth');document.getElementById('loginError').textContent='用户名或密码错误';return}
     sessionStorage.setItem('zw111_auth',cred);
-    location.reload();
+    startInit();
   }).catch(function(){_pendingAuthCreds=null;document.getElementById('loginError').textContent='网络错误'})
 }
 var _api=function(m,p,b){
@@ -401,10 +401,12 @@ function doFallback(){
   setInterval(function(){loadState().then(renderAll);loadEnrolled().then(function(){renderFingerprint()})},15000);
 }
 
-$('initOverlay').style.display='flex';
-var loadStart=Date.now();
-if(!_pendingAuthCreds){showLogin()}
-else {
+function startInit(){
+  initDone=false;
+  $('loginOverlay').classList.remove('active');
+  $('initOverlay').style.display='flex';
+  var loadStart=Date.now();
+  var fallbackTimer=setTimeout(function(){if(!initDone){initDone=true;doFallback()}},3000);
   // 设置3秒超时
   var fallbackTimer=setTimeout(function(){if(!initDone){initDone=true;doFallback()}},3000);
   _api('GET','/api/init').then(function(d){
@@ -417,4 +419,7 @@ else {
     if(!initDone){initDone=true;clearTimeout(fallbackTimer);doFallback()}
   })
 }
+
+if(!_pendingAuthCreds){showLogin()}
+else{startInit()}
 </script></body></html>
